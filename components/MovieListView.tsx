@@ -1,6 +1,6 @@
-import { MovieRow } from "./MovieRow.tsx";
-import { ShowAllToggle } from "./ShowAllToggle.tsx";
-import type { DisplayMovie, MovieList, StreamingService } from "../lib/types.ts";
+import { MovieRow } from "./MovieRow";
+import { ShowAllToggle } from "./ShowAllToggle";
+import type { DisplayMovie, MovieList, StreamingService } from "../lib/types";
 
 interface MovieListViewProps {
   list?: MovieList;
@@ -9,7 +9,6 @@ interface MovieListViewProps {
   showAll: boolean;
   onToggleShowAll: (nextValue: boolean) => void;
   loadingCount: number;
-  error?: string;
 }
 
 export function MovieListView({
@@ -19,7 +18,6 @@ export function MovieListView({
   showAll,
   onToggleShowAll,
   loadingCount,
-  error,
 }: MovieListViewProps) {
   return (
     <section className="panel list-panel">
@@ -32,7 +30,6 @@ export function MovieListView({
           <ShowAllToggle checked={showAll} onChange={onToggleShowAll} />
         </div>
       </div>
-      {error ? <p className="error-text">{error}</p> : null}
       {loadingCount > 0 ? <p className="helper-text">Checking availability for {loadingCount} title(s)…</p> : null}
       {!list ? (
         <div className="empty-state">

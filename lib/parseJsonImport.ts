@@ -1,5 +1,5 @@
-import { createMovieId } from "./normalize.ts";
-import type { MovieItem, MovieList } from "./types.ts";
+import { createMovieId } from "./normalize";
+import type { MovieItem, MovieList } from "./types";
 
 interface RawImportItem {
   rank?: unknown;

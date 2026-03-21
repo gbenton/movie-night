@@ -1,6 +1,6 @@
-import { slugifyTitle } from "../normalize.ts";
-import type { AvailabilityResult, StreamingService } from "../types.ts";
-import type { JustWatchSearchCandidate, JustWatchSearchResponse } from "./types.ts";
+import { slugifyTitle } from "../normalize";
+import type { AvailabilityResult, StreamingService } from "../types";
+import type { JustWatchSearchCandidate, JustWatchSearchResponse } from "./types";
 
 const JUSTWATCH_SEARCH_URL = "https://apis.justwatch.com/content/titles/en_US/popular";
 const COUNTRY_CODE = "US";
@@ -20,58 +20,54 @@ const PROVIDER_NAME_MAP: Record<string, StreamingService> = {
 };
 
 export async function fetchJustWatchAvailability(movieId: string, title: string, year?: number): Promise<AvailabilityResult> {
-  const response = await fetch(JUSTWATCH_SEARCH_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "User-Agent": "Mozilla/5.0",
-    },
-    body: JSON.stringify({
-      query: title,
-      content_types: ["movie"],
-      page_size: 5,
-      page: 1,
-      country: COUNTRY_CODE,
-      language: "en",
-    }),
-    next: { revalidate: 0 },
-  });
+  try {
+    const response = await fetch(JUSTWATCH_SEARCH_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0",
+      },
+      body: JSON.stringify({
+        query: title,
+        content_types: ["movie"],
+        page_size: 5,
+        page: 1,
+        country: COUNTRY_CODE,
+        language: "en",
+      }),
+      next: { revalidate: 0 },
+    });
 
-  if (!response.ok) {
-    throw new Error(`JustWatch request failed with ${response.status}`);
-  }
+    if (!response.ok) {
+      throw new Error(`JustWatch request failed with ${response.status}`);
+    }
 
-  const data = (await response.json()) as JustWatchSearchResponse;
-  const candidate = chooseBestCandidate(data.items ?? [], title, year);
+    const data = (await response.json()) as JustWatchSearchResponse;
+    const candidate = chooseBestCandidate(data.items ?? [], title, year);
 
-  if (!candidate) {
+    if (!candidate) {
+      return buildFallbackAvailability(movieId, title, year);
+    }
+
+    const services = extractServices(candidate);
+    const providerLinks = extractProviderLinks(candidate);
+
     return {
       movieId,
-      title,
-      year,
-      services: [],
+      title: candidate.title ?? title,
+      year: candidate.originalReleaseYear ?? year,
+      services,
+      providerLinks,
+      justWatchUrl: buildCandidateUrl(candidate, title),
+      posterUrl: candidate.posterUrl,
       lastCheckedAt: new Date().toISOString(),
-      status: "unavailable",
-      matchConfidence: "low",
-      justWatchUrl: buildFallbackJustWatchUrl(title),
+      status: services.length > 0 ? "available" : "unavailable",
+      matchConfidence: deriveConfidence(candidate, title, year),
     };
+  } catch (error) {
+    console.error("JustWatch lookup failed", { movieId, title, year, error });
+    return buildFallbackAvailability(movieId, title, year);
   }
-
-  const services = extractServices(candidate);
-  const providerLinks = extractProviderLinks(candidate);
-
-  return {
-    movieId,
-    title: candidate.title ?? title,
-    year: candidate.originalReleaseYear ?? year,
-    services,
-    providerLinks,
-    justWatchUrl: buildCandidateUrl(candidate, title),
-    posterUrl: candidate.posterUrl,
-    lastCheckedAt: new Date().toISOString(),
-    status: services.length > 0 ? "available" : "unavailable",
-    matchConfidence: deriveConfidence(candidate, title, year),
-  };
 }
 
 function chooseBestCandidate(candidates: JustWatchSearchCandidate[], title: string, year?: number): JustWatchSearchCandidate | undefined {
@@ -162,4 +158,17 @@ function deriveConfidence(candidate: JustWatchSearchCandidate, title: string, ye
   }
 
   return "low";
+}
+
+function buildFallbackAvailability(movieId: string, title: string, year?: number): AvailabilityResult {
+  return {
+    movieId,
+    title,
+    year,
+    services: [],
+    lastCheckedAt: new Date().toISOString(),
+    status: "unavailable",
+    matchConfidence: "low",
+    justWatchUrl: buildFallbackJustWatchUrl(title),
+  };
 }

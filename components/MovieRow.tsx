@@ -1,4 +1,4 @@
-import type { DisplayMovie, StreamingService } from "../lib/types.ts";
+import type { DisplayMovie, StreamingService } from "../lib/types";
 
 interface MovieRowProps {
   movie: DisplayMovie;
@@ -12,6 +12,7 @@ export function MovieRow({ movie, selectedServices }: MovieRowProps) {
   const displayServices = matchedServices.length > 0 ? matchedServices : availability?.services ?? [];
   const link = firstLink(availability?.providerLinks) ?? availability?.justWatchUrl;
   const unavailable = availability?.status !== "available";
+  const watchLabel = availability?.providerLinks ? "Watch" : link ? "Search" : undefined;
 
   return (
     <article className={`movie-row ${unavailable ? "muted" : ""}`}>
@@ -31,13 +32,13 @@ export function MovieRow({ movie, selectedServices }: MovieRowProps) {
               </span>
             ))
           ) : (
-            <span className="service-badge unavailable">{availability?.status === "unknown" ? "Lookup failed" : "Not on your services"}</span>
+            <span className="service-badge unavailable">Not on your services</span>
           )}
         </div>
       </div>
-      {link ? (
+      {link && watchLabel ? (
         <a className="watch-link" href={link} target="_blank" rel="noreferrer">
-          Watch
+          {watchLabel}
         </a>
       ) : null}
     </article>

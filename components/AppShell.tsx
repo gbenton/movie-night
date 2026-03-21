@@ -1,13 +1,13 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { ImportPanel } from "./ImportPanel.tsx";
-import { ListPicker } from "./ListPicker.tsx";
-import { MovieListView } from "./MovieListView.tsx";
-import { ServiceSelector } from "./ServiceSelector.tsx";
-import { isAvailabilityFresh } from "../lib/availability/cache.ts";
-import { filterMovies } from "../lib/filterMovies.ts";
-import { createMovieId } from "../lib/normalize.ts";
+import { ImportPanel } from "./ImportPanel";
+import { ListPicker } from "./ListPicker";
+import { MovieListView } from "./MovieListView";
+import { ServiceSelector } from "./ServiceSelector";
+import { isAvailabilityFresh } from "../lib/availability/cache";
+import { filterMovies } from "../lib/filterMovies";
+import { createMovieId } from "../lib/normalize";
 import {
   getAvailabilityCache,
   getLastUsedListId,
@@ -17,8 +17,8 @@ import {
   setLastUsedListId,
   setLists,
   setSelectedServices,
-} from "../lib/storage.ts";
-import type { AvailabilityResult, MovieList, StreamingService } from "../lib/types.ts";
+} from "../lib/storage";
+import type { AvailabilityResult, MovieList, StreamingService } from "../lib/types";
 
 export function AppShell() {
   const [selectedServices, setSelectedServicesState] = useState<StreamingService[]>([]);
@@ -27,7 +27,6 @@ export function AppShell() {
   const [availabilityCache, setAvailabilityCacheState] = useState<Record<string, AvailabilityResult>>({});
   const [showAll, setShowAll] = useState(false);
   const [loadingCount, setLoadingCount] = useState(0);
-  const [lookupError, setLookupError] = useState<string>();
 
   useEffect(() => {
     setSelectedServicesState(getSelectedServices());
@@ -64,7 +63,6 @@ export function AppShell() {
 
     let cancelled = false;
     setLoadingCount(staleMovies.length);
-    setLookupError(undefined);
 
     (async () => {
       const updates: Record<string, AvailabilityResult> = {};
@@ -90,12 +88,9 @@ export function AppShell() {
             year: movie.year,
             services: [],
             lastCheckedAt: new Date().toISOString(),
-            status: "unknown",
+            status: "unavailable",
             matchConfidence: "low",
           };
-          if (!cancelled) {
-            setLookupError("Some availability checks failed. You can still browse the rest of the list.");
-          }
         } finally {
           if (!cancelled) {
             setLoadingCount((current) => Math.max(current - 1, 0));
@@ -167,7 +162,6 @@ export function AppShell() {
           showAll={showAll}
           onToggleShowAll={setShowAll}
           loadingCount={loadingCount}
-          error={lookupError}
         />
       </div>
     </main>
