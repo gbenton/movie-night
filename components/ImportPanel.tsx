@@ -1,9 +1,9 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { createMovieListFromText } from "../lib/parseTextImport.ts";
-import { parseJsonImport } from "../lib/parseJsonImport.ts";
-import type { MovieList } from "../lib/types.ts";
+import { createMovieListFromText } from "../lib/parseTextImport";
+import { parseJsonImport } from "../lib/parseJsonImport";
+import type { MovieList } from "../lib/types";
 
 interface ImportPanelProps {
   onImport: (list: MovieList) => void;

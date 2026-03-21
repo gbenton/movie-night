@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createMovieId, normalizeTitle } from "./normalize.ts";
+import { createMovieId, normalizeTitle } from "./normalize";
 
 test("normalizeTitle removes punctuation noise and collapses whitespace", () => {
   assert.equal(normalizeTitle("  Spider-Man: No Way Home!  "), "spider-man no way home");
