@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseJsonImport } from "./parseJsonImport.ts";
+import { parseJsonImport } from "./parseJsonImport";
 
 test("parseJsonImport accepts valid structured imports", () => {
   const list = parseJsonImport(JSON.stringify({ listName: "Favorites", items: [{ rank: 1, title: "Heat", year: 1995 }] }));

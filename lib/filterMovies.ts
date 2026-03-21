@@ -1,5 +1,5 @@
-import { createMovieId } from "./normalize.ts";
-import type { AvailabilityResult, DisplayMovie, MovieList, StreamingService } from "./types.ts";
+import { createMovieId } from "./normalize";
+import type { AvailabilityResult, DisplayMovie, MovieList, StreamingService } from "./types";
 
 interface FilterOptions {
   list?: MovieList;
