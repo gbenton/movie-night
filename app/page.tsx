@@ -1,4 +1,4 @@
-import { AppShell } from "../components/AppShell";
+import { AppShell } from "../components/AppShell.tsx";
 
 export default function Page() {
   return <AppShell />;

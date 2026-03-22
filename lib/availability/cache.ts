@@ -1,5 +1,5 @@
-import { AVAILABILITY_TTL_MS } from "../constants";
-import type { AvailabilityResult } from "../types";
+import { AVAILABILITY_TTL_MS } from "../constants.ts";
+import type { AvailabilityResult } from "../types.ts";
 
 export function isAvailabilityFresh(entry?: AvailabilityResult): boolean {
   if (!entry) {

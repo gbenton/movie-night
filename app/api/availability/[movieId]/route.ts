@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { fetchJustWatchAvailability } from "../../../../lib/availability/justWatch";
+import { fetchJustWatchAvailability } from "../../../../lib/availability/justWatch.ts";
 
 export async function POST(request: Request, context: { params: Promise<{ movieId: string }> }) {
   const { movieId } = await context.params;

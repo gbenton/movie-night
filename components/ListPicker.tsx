@@ -1,4 +1,4 @@
-import type { MovieList } from "../lib/types";
+import type { MovieList } from "../lib/types.ts";
 
 interface ListPickerProps {
   lists: MovieList[];

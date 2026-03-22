@@ -1,4 +1,4 @@
-import type { StreamingService } from "./types";
+import type { StreamingService } from "./types.ts";
 
 export const STREAMING_SERVICES: StreamingService[] = [
   "Netflix",

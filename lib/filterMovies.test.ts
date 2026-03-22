@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { filterMovies } from "./filterMovies";
-import { createMovieId } from "./normalize";
-import type { MovieList } from "./types";
+import { filterMovies } from "./filterMovies.ts";
+import { createMovieId } from "./normalize.ts";
+import type { MovieList } from "./types.ts";
 
 const list: MovieList = {
   id: "list-1",

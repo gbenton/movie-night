@@ -1,5 +1,5 @@
-import { createMovieId } from "./normalize";
-import type { MovieItem, MovieList } from "./types";
+import { createMovieId } from "./normalize.ts";
+import type { MovieItem, MovieList } from "./types.ts";
 
 const RANK_PATTERN = /^\s*(\d+)[\).\-\s]+/;
 const YEAR_PATTERN = /\((\d{4})\)\s*$/;

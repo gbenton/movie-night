@@ -1,5 +1,5 @@
-import { STREAMING_SERVICES } from "../lib/constants";
-import type { StreamingService } from "../lib/types";
+import { STREAMING_SERVICES } from "../lib/constants.ts";
+import type { StreamingService } from "../lib/types.ts";
 
 interface ServiceSelectorProps {
   selectedServices: StreamingService[];
