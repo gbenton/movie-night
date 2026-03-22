@@ -1,13 +1,13 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { ImportPanel } from "./ImportPanel";
-import { ListPicker } from "./ListPicker";
-import { MovieListView } from "./MovieListView";
-import { ServiceSelector } from "./ServiceSelector";
-import { isAvailabilityFresh } from "../lib/availability/cache";
-import { filterMovies } from "../lib/filterMovies";
-import { createMovieId } from "../lib/normalize";
+import { ImportPanel } from "./ImportPanel.tsx";
+import { ListPicker } from "./ListPicker.tsx";
+import { MovieListView } from "./MovieListView.tsx";
+import { ServiceSelector } from "./ServiceSelector.tsx";
+import { isAvailabilityFresh } from "../lib/availability/cache.ts";
+import { filterMovies } from "../lib/filterMovies.ts";
+import { createMovieId } from "../lib/normalize.ts";
 import {
   getAvailabilityCache,
   getLastUsedListId,
@@ -17,8 +17,8 @@ import {
   setLastUsedListId,
   setLists,
   setSelectedServices,
-} from "../lib/storage";
-import type { AvailabilityResult, MovieList, StreamingService } from "../lib/types";
+} from "../lib/storage.ts";
+import type { AvailabilityResult, MovieList, StreamingService } from "../lib/types.ts";
 
 export function AppShell() {
   const [selectedServices, setSelectedServicesState] = useState<StreamingService[]>([]);

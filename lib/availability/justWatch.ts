@@ -1,6 +1,6 @@
-import { slugifyTitle } from "../normalize";
-import type { AvailabilityResult, StreamingService } from "../types";
-import type { JustWatchSearchCandidate, JustWatchSearchResponse } from "./types";
+import { slugifyTitle } from "../normalize.ts";
+import type { AvailabilityResult, StreamingService } from "../types.ts";
+import type { JustWatchSearchCandidate, JustWatchSearchResponse } from "./types.ts";
 
 const JUSTWATCH_SEARCH_URL = "https://apis.justwatch.com/content/titles/en_US/popular";
 const COUNTRY_CODE = "US";

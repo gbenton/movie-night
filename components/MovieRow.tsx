@@ -1,4 +1,4 @@
-import type { DisplayMovie, StreamingService } from "../lib/types";
+import type { DisplayMovie, StreamingService } from "../lib/types.ts";
 
 interface MovieRowProps {
   movie: DisplayMovie;
