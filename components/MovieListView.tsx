@@ -1,6 +1,6 @@
-import { MovieRow } from "./MovieRow.tsx";
-import { ShowAllToggle } from "./ShowAllToggle.tsx";
-import type { DisplayMovie, MovieList, StreamingService } from "../lib/types.ts";
+import { MovieRow } from "./MovieRow";
+import { ShowAllToggle } from "./ShowAllToggle";
+import type { DisplayMovie, MovieList, StreamingService } from "../lib/types";
 
 interface MovieListViewProps {
   list?: MovieList;

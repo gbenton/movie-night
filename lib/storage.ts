@@ -1,5 +1,5 @@
-import { STORAGE_KEYS } from "./constants.ts";
-import type { AvailabilityResult, MovieList, StreamingService } from "./types.ts";
+import { STORAGE_KEYS } from "./constants";
+import type { AvailabilityResult, MovieList, StreamingService } from "./types";
 
 function safeStorage(): Storage | undefined {
   if (typeof window === "undefined") {

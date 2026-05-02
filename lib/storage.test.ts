@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { getAvailabilityCache, getLists, getSelectedServices, setLists, setSelectedServices } from "./storage.ts";
+import { getAvailabilityCache, getLists, getSelectedServices, setLists, setSelectedServices } from "./storage";
 
 test("storage returns safe defaults when window is unavailable", () => {
   assert.deepEqual(getSelectedServices(), []);

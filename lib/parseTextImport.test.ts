@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseTextImport } from "./parseTextImport.ts";
+import { parseTextImport } from "./parseTextImport";
 
 test("parseTextImport supports ranked lines with years", () => {
   const [movie] = parseTextImport("1. The Social Network (2010)");

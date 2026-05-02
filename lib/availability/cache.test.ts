@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isAvailabilityFresh } from "./cache.ts";
+import { isAvailabilityFresh } from "./cache";
 
 test("isAvailabilityFresh returns true for a recent entry", () => {
   assert.equal(
