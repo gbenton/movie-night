@@ -27,7 +27,6 @@ export function AppShell() {
   const [availabilityCache, setAvailabilityCacheState] = useState<Record<string, AvailabilityResult>>({});
   const [showAll, setShowAll] = useState(false);
   const [loadingCount, setLoadingCount] = useState(0);
-  const [lookupError, setLookupError] = useState<string>();
 
   useEffect(() => {
     setSelectedServicesState(getSelectedServices());
@@ -64,7 +63,6 @@ export function AppShell() {
 
     let cancelled = false;
     setLoadingCount(staleMovies.length);
-    setLookupError(undefined);
 
     (async () => {
       const updates: Record<string, AvailabilityResult> = {};
@@ -90,12 +88,9 @@ export function AppShell() {
             year: movie.year,
             services: [],
             lastCheckedAt: new Date().toISOString(),
-            status: "unknown",
+            status: "unavailable",
             matchConfidence: "low",
           };
-          if (!cancelled) {
-            setLookupError("Some availability checks failed. You can still browse the rest of the list.");
-          }
         } finally {
           if (!cancelled) {
             setLoadingCount((current) => Math.max(current - 1, 0));
@@ -167,7 +162,6 @@ export function AppShell() {
           showAll={showAll}
           onToggleShowAll={setShowAll}
           loadingCount={loadingCount}
-          error={lookupError}
         />
       </div>
     </main>
