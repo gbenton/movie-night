@@ -248,6 +248,7 @@ test("fetchJustWatchAvailability prefers a stronger search result over a weak di
   ]);
   assert.equal(result.status, "available");
   assert.deepEqual(result.services, ["Max"]);
+  assert.equal(result.providerLinks?.Max, "https://play.hbomax.com/show/marie-antoinette");
   assert.equal(result.justWatchUrl, "https://www.justwatch.com/us/movie/marie-antoinette-2006-0");
   assert.equal(result.matchConfidence, "high");
 });

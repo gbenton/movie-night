@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ImportPanel } from "./ImportPanel";
 import { ListPicker } from "./ListPicker";
 import { MovieListView } from "./MovieListView";
@@ -19,7 +19,10 @@ import {
   setLists,
   setSelectedServices,
 } from "../lib/storage";
-import type { AvailabilityResult, MovieList, StreamingService } from "../lib/types";
+import type { AvailabilityResult, MovieItem, MovieList, StreamingService } from "../lib/types";
+
+const AVAILABILITY_LOOKUP_CONCURRENCY = 4;
+const AVAILABILITY_CLIENT_TIMEOUT_MS = 8_000;
 
 export function AppShell() {
   const [selectedServices, setSelectedServicesState] = useState<StreamingService[]>([]);
@@ -28,6 +31,7 @@ export function AppShell() {
   const [availabilityCache, setAvailabilityCacheState] = useState<Record<string, AvailabilityResult>>({});
   const [showAll, setShowAll] = useState(false);
   const [loadingCount, setLoadingCount] = useState(0);
+  const inFlightAvailabilityKeysRef = useRef(new Set<string>());
 
   useEffect(() => {
     setSelectedServicesState(getSelectedServices());
@@ -57,8 +61,16 @@ export function AppShell() {
       return;
     }
 
-    const staleMovies = activeList.movies.filter((movie) => !isAvailabilityFresh(availabilityCache[createMovieId(movie.title, movie.year)]));
+    const staleMovies = activeList.movies.filter((movie) => {
+      const key = createMovieId(movie.title, movie.year);
+      const availability = availabilityCache[key];
+      return (
+        !inFlightAvailabilityKeysRef.current.has(key) &&
+        !isAvailabilityFresh(availability)
+      );
+    });
     if (staleMovies.length === 0) {
+      setLoadingCount(0);
       return;
     }
 
@@ -66,58 +78,81 @@ export function AppShell() {
     setLoadingCount(staleMovies.length);
 
     (async () => {
-      const updates: Record<string, AvailabilityResult> = {};
+      let nextMovieIndex = 0;
 
-      for (const movie of staleMovies) {
+      async function lookupMovie(movie: MovieItem) {
         const key = createMovieId(movie.title, movie.year);
+        inFlightAvailabilityKeysRef.current.add(key);
+        let update: AvailabilityResult;
+
         try {
           const response = await fetch(`/api/availability/${encodeURIComponent(movie.id)}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ title: movie.title, year: movie.year }),
+            signal: AbortSignal.timeout(AVAILABILITY_CLIENT_TIMEOUT_MS),
           });
 
           if (!response.ok) {
             throw new Error(`Lookup failed for ${movie.title}`);
           }
 
-          updates[key] = (await response.json()) as AvailabilityResult;
+          update = (await response.json()) as AvailabilityResult;
         } catch {
-          updates[key] = {
+          update = {
             movieId: movie.id,
             title: movie.title,
             year: movie.year,
             services: [],
             lastCheckedAt: new Date().toISOString(),
-            status: "unavailable",
+            status: "unknown",
             matchConfidence: "low",
           };
         } finally {
+          inFlightAvailabilityKeysRef.current.delete(key);
+
           if (!cancelled) {
-            setLoadingCount((current) => Math.max(current - 1, 0));
+            setAvailabilityCacheState((current) => {
+              const next = { ...current, [key]: update };
+              setAvailabilityCache(next);
+              return next;
+            });
           }
+
+          setLoadingCount((current) => Math.max(current - 1, 0));
         }
       }
+
+      async function lookupNextMovie() {
+        while (!cancelled) {
+          const movie = staleMovies[nextMovieIndex];
+          nextMovieIndex += 1;
+
+          if (!movie) {
+            return;
+          }
+
+          await lookupMovie(movie);
+        }
+      }
+
+      await Promise.all(
+        Array.from({ length: Math.min(AVAILABILITY_LOOKUP_CONCURRENCY, staleMovies.length) }, () => lookupNextMovie()),
+      );
 
       if (cancelled) {
         return;
       }
-
-      setAvailabilityCacheState((current) => {
-        const next = { ...current, ...updates };
-        setAvailabilityCache(next);
-        return next;
-      });
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [activeList, availabilityCache]);
+  }, [activeList]);
 
   const visibleMovies = useMemo(
-    () => filterMovies({ list: activeList, selectedServices, availabilityByMovieKey: availabilityCache, showAll }),
-    [activeList, availabilityCache, selectedServices, showAll],
+    () => filterMovies({ list: activeList, selectedServices, availabilityByMovieKey: availabilityCache, showAll: showAll || loadingCount > 0 }),
+    [activeList, availabilityCache, loadingCount, selectedServices, showAll],
   );
 
   function handleToggleService(service: StreamingService) {

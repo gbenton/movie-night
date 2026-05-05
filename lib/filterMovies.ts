@@ -27,7 +27,11 @@ export function filterMovies({ list, selectedServices, availabilityByMovieKey, s
       }
 
       const availability = movie.availability;
-      if (!availability || availability.status !== "available") {
+      if (!availability) {
+        return false;
+      }
+
+      if (availability.status !== "available") {
         return false;
       }
 
