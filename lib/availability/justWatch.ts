@@ -3,6 +3,7 @@ import type { AvailabilityResult, StreamingService } from "../types";
 import type { JustWatchJsonLdMovie, JustWatchPotentialAction } from "./types";
 
 const JUSTWATCH_MOVIE_URL = "https://www.justwatch.com/us/movie";
+const JUSTWATCH_SEARCH_URL = "https://www.justwatch.com/us/search";
 
 const STREAMING_BUSINESS_FUNCTIONS = new Set([
   "https://schema.org/ProvideService",
@@ -41,7 +42,7 @@ export async function fetchJustWatchAvailability(movieId: string, title: string,
 
     return {
       movieId,
-      title: candidate.movie.name ?? title,
+      title: getText(candidate.movie.name) ?? title,
       year: extractYear(candidate.movie.dateCreated) ?? year,
       services,
       providerLinks,
@@ -61,10 +62,10 @@ async function fetchBestJustWatchPage(
   title: string,
   year?: number,
 ): Promise<{ movie: JustWatchJsonLdMovie; url: string } | undefined> {
-  const urls = buildCandidateUrls(title, year);
+  const urls = [...buildCandidateUrls(title, year)];
   let bestCandidate: { movie: JustWatchJsonLdMovie; url: string; score: number } | undefined;
 
-  for (const url of urls) {
+  async function inspectUrl(url: string): Promise<boolean> {
     const response = await fetch(url, {
       headers: {
         Accept: "text/html,application/xhtml+xml",
@@ -74,13 +75,13 @@ async function fetchBestJustWatchPage(
     });
 
     if (!response.ok) {
-      continue;
+      return false;
     }
 
     const html = await response.text();
     const movie = extractJsonLdMovie(html);
     if (!movie) {
-      continue;
+      return false;
     }
 
     const score = scoreMovie(movie, title, year);
@@ -88,8 +89,25 @@ async function fetchBestJustWatchPage(
       bestCandidate = { movie, url: extractCanonicalUrl(html) ?? url, score };
     }
 
-    if (score >= 7) {
+    return score >= 7;
+  }
+
+  for (const url of urls) {
+    if (await inspectUrl(url)) {
       break;
+    }
+  }
+
+  if (!bestCandidate || bestCandidate.score < 7) {
+    for (const searchResultUrl of await fetchSearchResultUrls(title)) {
+      if (urls.includes(searchResultUrl)) {
+        continue;
+      }
+
+      urls.push(searchResultUrl);
+      if (await inspectUrl(searchResultUrl)) {
+        break;
+      }
     }
   }
 
@@ -107,6 +125,37 @@ function buildCandidateUrls(title: string, year?: number): string[] {
   }
 
   return Array.from(new Set(urls));
+}
+
+async function fetchSearchResultUrls(title: string): Promise<string[]> {
+  const response = await fetch(`${JUSTWATCH_SEARCH_URL}?q=${encodeURIComponent(title)}`, {
+    headers: {
+      Accept: "text/html,application/xhtml+xml",
+      "User-Agent": "Mozilla/5.0",
+    },
+    next: { revalidate: 0 },
+  });
+
+  if (!response.ok) {
+    return [];
+  }
+
+  return extractMovieUrls(await response.text()).slice(0, 8);
+}
+
+function extractMovieUrls(html: string): string[] {
+  const urls: string[] = [];
+  const matches = html.matchAll(/(?:href=["'])?(\/us\/movie\/[^"'?#<>\s\\]+)|\\u002Fus\\u002Fmovie\\u002F([^"'?#<>\s\\]+)/gi);
+
+  for (const match of matches) {
+    const path = match[1] ?? `/us/movie/${match[2]}`;
+    const url = `https://www.justwatch.com${decodeHtmlEntities(path)}`;
+    if (!urls.includes(url)) {
+      urls.push(url);
+    }
+  }
+
+  return urls;
 }
 
 function extractJsonLdMovie(html: string): JustWatchJsonLdMovie | undefined {
@@ -157,7 +206,7 @@ function extractCanonicalUrl(html: string): string | undefined {
 
 function scoreMovie(candidate: JustWatchJsonLdMovie, title: string, year?: number): number {
   let score = 0;
-  const candidateTitle = (candidate.name ?? "").trim().toLowerCase();
+  const candidateTitle = (getText(candidate.name) ?? "").trim().toLowerCase();
   const normalizedTitle = title.trim().toLowerCase();
   const candidateYear = extractYear(candidate.dateCreated);
 
@@ -239,7 +288,7 @@ function mapServiceName(providerName: string): StreamingService {
 }
 
 function deriveConfidence(candidate: JustWatchJsonLdMovie, title: string, year?: number): "high" | "medium" | "low" {
-  const candidateTitle = (candidate.name ?? "").trim().toLowerCase();
+  const candidateTitle = (getText(candidate.name) ?? "").trim().toLowerCase();
   const normalizedTitle = title.trim().toLowerCase();
   const candidateYear = extractYear(candidate.dateCreated);
 
@@ -254,9 +303,22 @@ function deriveConfidence(candidate: JustWatchJsonLdMovie, title: string, year?:
   return "low";
 }
 
-function extractYear(dateCreated?: string): number | undefined {
-  const match = dateCreated?.match(/^(\d{4})/);
+function extractYear(dateCreated?: unknown): number | undefined {
+  const value = getText(dateCreated);
+  const match = value?.match(/^(\d{4})/);
   return match ? Number(match[1]) : undefined;
+}
+
+function getText(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.find((item): item is string => typeof item === "string");
+  }
+
+  return undefined;
 }
 
 function buildFallbackAvailability(

@@ -1,8 +1,8 @@
 export interface JustWatchJsonLdMovie {
   "@type"?: string;
   "@id"?: string;
-  name?: string;
-  dateCreated?: string;
+  name?: unknown;
+  dateCreated?: unknown;
   image?: string;
   potentialAction?: JustWatchPotentialAction | JustWatchPotentialAction[];
 }
