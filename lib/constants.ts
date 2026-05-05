@@ -18,7 +18,7 @@ export const STORAGE_KEYS = {
   selectedServices: "movie-night:selected-services",
   lists: "movie-night:lists",
   lastUsedListId: "movie-night:last-used-list-id",
-  availabilityCache: "movie-night:availability-cache",
+  availabilityCache: "movie-night:availability-cache:v2",
 } as const;
 
 export const AVAILABILITY_TTL_MS = 24 * 60 * 60 * 1000;

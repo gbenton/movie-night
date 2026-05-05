@@ -27,3 +27,16 @@ test("isAvailabilityFresh returns false for a stale entry", () => {
     false,
   );
 });
+
+test("isAvailabilityFresh returns false for unknown entries", () => {
+  assert.equal(
+    isAvailabilityFresh({
+      movieId: "heat",
+      title: "Heat",
+      services: [],
+      lastCheckedAt: new Date().toISOString(),
+      status: "unknown",
+    }),
+    false,
+  );
+});
