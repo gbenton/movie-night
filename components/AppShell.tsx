@@ -13,6 +13,7 @@ import {
   getLastUsedListId,
   getLists,
   getSelectedServices,
+  clearLastUsedListId,
   setAvailabilityCache,
   setLastUsedListId,
   setLists,
@@ -141,6 +142,30 @@ export function AppShell() {
     setLastUsedListId(listId);
   }
 
+  function handleDeleteList(listId: string) {
+    const deletedIndex = lists.findIndex((list) => list.id === listId);
+    if (deletedIndex === -1) {
+      return;
+    }
+
+    const next = lists.filter((list) => list.id !== listId);
+    setListsState(next);
+    setLists(next);
+
+    if (activeList?.id !== listId) {
+      return;
+    }
+
+    const nextActiveList = next[deletedIndex] ?? next[deletedIndex - 1];
+    setLastUsedListIdState(nextActiveList?.id);
+    if (nextActiveList) {
+      setLastUsedListId(nextActiveList.id);
+    } else {
+      clearLastUsedListId();
+    }
+    setShowAll(false);
+  }
+
   return (
     <main>
       <header className="hero panel">
@@ -154,7 +179,7 @@ export function AppShell() {
       <div className="stack-lg">
         <ServiceSelector selectedServices={selectedServices} onToggle={handleToggleService} />
         <ImportPanel onImport={handleImport} />
-        <ListPicker lists={lists} activeListId={activeList?.id} onSelect={handleSelectList} />
+        <ListPicker lists={lists} activeListId={activeList?.id} onSelect={handleSelectList} onDelete={handleDeleteList} />
         <MovieListView
           list={activeList}
           movies={visibleMovies}

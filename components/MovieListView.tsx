@@ -21,7 +21,7 @@ export function MovieListView({
 }: MovieListViewProps) {
   return (
     <section className="panel list-panel">
-      <div className="section-heading">
+      <div className="section-heading list-heading">
         <div>
           <p className="eyebrow">Now watching</p>
           <h2>{list?.name ?? "No list selected"}</h2>

@@ -2,38 +2,89 @@ import { slugifyTitle } from "../normalize";
 import type { AvailabilityResult, StreamingService } from "../types";
 import type { JustWatchSearchCandidate, JustWatchSearchResponse } from "./types";
 
-const JUSTWATCH_SEARCH_URL = "https://apis.justwatch.com/content/titles/en_US/popular";
+const JUSTWATCH_GRAPHQL_URL = "https://apis.justwatch.com/graphql";
 const COUNTRY_CODE = "US";
+const LANGUAGE_CODE = "en";
+
+const SEARCH_QUERY = `
+  query GetSearchTitles(
+    $searchTitlesFilter: TitleFilter!
+    $country: Country!
+    $language: Language!
+    $first: Int!
+    $filter: OfferFilter!
+  ) {
+    popularTitles(
+      country: $country
+      filter: $searchTitlesFilter
+      first: $first
+      sortBy: POPULAR
+      sortRandomSeed: 0
+    ) {
+      edges {
+        node {
+          id
+          objectId
+          objectType
+          content(country: $country, language: $language) {
+            title
+            fullPath
+            originalReleaseYear
+            posterUrl
+          }
+          offers(country: $country, platform: WEB, filter: $filter) {
+            standardWebURL
+            deeplinkRoku: deeplinkURL(platform: ROKU_OS)
+            package {
+              clearName
+              technicalName
+              shortName
+              slug
+            }
+          }
+        }
+      }
+    }
+  }
+`;
 
 const PROVIDER_NAME_MAP: Record<string, StreamingService> = {
   netflix: "Netflix",
   hulu: "Hulu",
   amazon_prime_video: "Prime Video",
+  amazonprime: "Prime Video",
   max: "Max",
   disney_plus: "Disney+",
+  disneyplus: "Disney+",
   apple_tv_plus: "Apple TV+",
+  appletvplus: "Apple TV+",
   peacock_premium: "Peacock",
   peacocktv: "Peacock",
+  peacocktvpremium: "Peacock",
   paramount_plus: "Paramount+",
-  criterion_channel: "Criterion Channel",
-  mubi: "MUBI",
+  paramountpluspremium: "Paramount+",
+  paramountplusessential: "Paramount+",
+  kanopy: "Kanopy",
 };
 
 export async function fetchJustWatchAvailability(movieId: string, title: string, year?: number): Promise<AvailabilityResult> {
   try {
-    const response = await fetch(JUSTWATCH_SEARCH_URL, {
+    const response = await fetch(JUSTWATCH_GRAPHQL_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "User-Agent": "Mozilla/5.0",
       },
       body: JSON.stringify({
-        query: title,
-        content_types: ["movie"],
-        page_size: 5,
-        page: 1,
-        country: COUNTRY_CODE,
-        language: "en",
+        operationName: "GetSearchTitles",
+        variables: {
+          first: 5,
+          searchTitlesFilter: { searchQuery: title },
+          country: COUNTRY_CODE,
+          language: LANGUAGE_CODE,
+          filter: { bestOnly: true },
+        },
+        query: SEARCH_QUERY,
       }),
       next: { revalidate: 0 },
     });
@@ -43,7 +94,11 @@ export async function fetchJustWatchAvailability(movieId: string, title: string,
     }
 
     const data = (await response.json()) as JustWatchSearchResponse;
-    const candidate = chooseBestCandidate(data.items ?? [], title, year);
+    if (data.errors?.length) {
+      throw new Error("JustWatch GraphQL response contained errors");
+    }
+
+    const candidate = chooseBestCandidate(extractCandidates(data), title, year);
 
     if (!candidate) {
       return buildFallbackAvailability(movieId, title, year);
@@ -54,12 +109,12 @@ export async function fetchJustWatchAvailability(movieId: string, title: string,
 
     return {
       movieId,
-      title: candidate.title ?? title,
-      year: candidate.originalReleaseYear ?? year,
+      title: getCandidateTitle(candidate) ?? title,
+      year: getCandidateYear(candidate) ?? year,
       services,
       providerLinks,
       justWatchUrl: buildCandidateUrl(candidate, title),
-      posterUrl: candidate.posterUrl,
+      posterUrl: getCandidatePosterUrl(candidate),
       lastCheckedAt: new Date().toISOString(),
       status: services.length > 0 ? "available" : "unavailable",
       matchConfidence: deriveConfidence(candidate, title, year),
@@ -70,21 +125,29 @@ export async function fetchJustWatchAvailability(movieId: string, title: string,
   }
 }
 
+function extractCandidates(data: JustWatchSearchResponse): JustWatchSearchCandidate[] {
+  if (data.items) {
+    return data.items;
+  }
+
+  return data.data?.popularTitles?.edges?.map((edge) => edge.node).filter((node): node is JustWatchSearchCandidate => Boolean(node)) ?? [];
+}
+
 function chooseBestCandidate(candidates: JustWatchSearchCandidate[], title: string, year?: number): JustWatchSearchCandidate | undefined {
   const normalizedTitle = title.trim().toLowerCase();
 
   const scored = candidates
-    .filter((candidate) => (candidate.objectType ?? "movie") === "movie")
+    .filter((candidate) => (candidate.objectType ?? "movie").toLowerCase() === "movie")
     .map((candidate) => {
       let score = 0;
-      const candidateTitle = (candidate.title ?? "").trim().toLowerCase();
+      const candidateTitle = (getCandidateTitle(candidate) ?? "").trim().toLowerCase();
       if (candidateTitle === normalizedTitle) {
         score += 4;
       } else if (candidateTitle.includes(normalizedTitle) || normalizedTitle.includes(candidateTitle)) {
         score += 2;
       }
 
-      if (typeof year === "number" && candidate.originalReleaseYear === year) {
+      if (typeof year === "number" && getCandidateYear(candidate) === year) {
         score += 3;
       }
 
@@ -107,7 +170,7 @@ function extractServices(candidate: JustWatchSearchCandidate): StreamingService[
   const mapped = new Set<StreamingService>();
 
   for (const offer of candidate.offers ?? []) {
-    const provider = offer.package?.technicalName ?? offer.package?.clearName?.toLowerCase().replace(/\s+/g, "_");
+    const provider = getProviderKey(offer.package);
     if (!provider) {
       continue;
     }
@@ -134,11 +197,12 @@ function extractProviderLinks(candidate: JustWatchSearchCandidate): Record<strin
 }
 
 function buildCandidateUrl(candidate: JustWatchSearchCandidate, title: string): string {
-  if (candidate.fullPath) {
-    return `https://www.justwatch.com${candidate.fullPath}`;
+  const fullPath = candidate.fullPath ?? candidate.content?.fullPath;
+  if (fullPath) {
+    return `https://www.justwatch.com${fullPath}`;
   }
 
-  return buildFallbackJustWatchUrl(candidate.title ?? title);
+  return buildFallbackJustWatchUrl(getCandidateTitle(candidate) ?? title);
 }
 
 function buildFallbackJustWatchUrl(title: string): string {
@@ -146,10 +210,10 @@ function buildFallbackJustWatchUrl(title: string): string {
 }
 
 function deriveConfidence(candidate: JustWatchSearchCandidate, title: string, year?: number): "high" | "medium" | "low" {
-  const candidateTitle = (candidate.title ?? "").trim().toLowerCase();
+  const candidateTitle = (getCandidateTitle(candidate) ?? "").trim().toLowerCase();
   const normalizedTitle = title.trim().toLowerCase();
 
-  if (candidateTitle === normalizedTitle && (!year || candidate.originalReleaseYear === year)) {
+  if (candidateTitle === normalizedTitle && (!year || getCandidateYear(candidate) === year)) {
     return "high";
   }
 
@@ -158,6 +222,23 @@ function deriveConfidence(candidate: JustWatchSearchCandidate, title: string, ye
   }
 
   return "low";
+}
+
+function getCandidateTitle(candidate: JustWatchSearchCandidate): string | undefined {
+  return candidate.title ?? candidate.content?.title;
+}
+
+function getCandidateYear(candidate: JustWatchSearchCandidate): number | undefined {
+  return candidate.originalReleaseYear ?? candidate.content?.originalReleaseYear;
+}
+
+function getCandidatePosterUrl(candidate: JustWatchSearchCandidate): string | undefined {
+  const posterUrl = candidate.posterUrl ?? candidate.content?.posterUrl;
+  return posterUrl?.replace("{profile}", "s718").replace("{format}", "jpg");
+}
+
+function getProviderKey(provider?: { clearName?: string; technicalName?: string; shortName?: string; slug?: string }): string | undefined {
+  return provider?.technicalName ?? provider?.slug?.replace(/-/g, "_") ?? provider?.clearName?.toLowerCase().replace(/\s+/g, "_");
 }
 
 function buildFallbackAvailability(movieId: string, title: string, year?: number): AvailabilityResult {
