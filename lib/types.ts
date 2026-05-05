@@ -7,8 +7,7 @@ export type StreamingService =
   | "Apple TV+"
   | "Peacock"
   | "Paramount+"
-  | "Criterion Channel"
-  | "MUBI"
+  | "Kanopy"
   | "Other";
 
 export interface MovieItem {

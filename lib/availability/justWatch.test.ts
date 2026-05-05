@@ -58,7 +58,7 @@ test("fetchJustWatchAvailability parses streaming services from JustWatch JSON-L
 
   assert.equal(requestedUrl, "https://www.justwatch.com/us/movie/parasite-2019");
   assert.equal(result.status, "available");
-  assert.deepEqual(result.services, ["Other"]);
+  assert.deepEqual(result.services, ["Kanopy"]);
   assert.equal(result.providerLinks?.Kanopy, "https://www.kanopy.com/product/justwatch-11347306");
   assert.equal(result.justWatchUrl, "https://www.justwatch.com/us/movie/parasite-2019");
   assert.equal(result.matchConfidence, "high");

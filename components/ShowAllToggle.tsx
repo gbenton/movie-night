@@ -6,7 +6,7 @@ interface ShowAllToggleProps {
 export function ShowAllToggle({ checked, onChange }: ShowAllToggleProps) {
   return (
     <label className="toggle-row">
-      <span>
+      <span className="toggle-copy">
         <strong>Show all</strong>
         <small>Reveal titles without a match on your selected services.</small>
       </span>

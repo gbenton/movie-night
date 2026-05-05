@@ -1,5 +1,7 @@
-import { STORAGE_KEYS } from "./constants";
+import { STORAGE_KEYS, STREAMING_SERVICES } from "./constants";
 import type { AvailabilityResult, MovieList, StreamingService } from "./types";
+
+const SELECTABLE_STREAMING_SERVICES = new Set<string>(STREAMING_SERVICES);
 
 function safeStorage(): Storage | undefined {
   if (typeof window === "undefined") {
@@ -38,7 +40,9 @@ function writeJson<T>(key: string, value: T): void {
 
 export function getSelectedServices(): StreamingService[] {
   const value = readJson<unknown>(STORAGE_KEYS.selectedServices, []);
-  return Array.isArray(value) ? (value.filter((item): item is StreamingService => typeof item === "string") as StreamingService[]) : [];
+  return Array.isArray(value)
+    ? (value.filter((item): item is StreamingService => typeof item === "string" && SELECTABLE_STREAMING_SERVICES.has(item)) as StreamingService[])
+    : [];
 }
 
 export function setSelectedServices(services: StreamingService[]): void {
@@ -67,6 +71,11 @@ export function getLastUsedListId(): string | undefined {
 export function setLastUsedListId(id: string): void {
   const storage = safeStorage();
   storage?.setItem(STORAGE_KEYS.lastUsedListId, id);
+}
+
+export function clearLastUsedListId(): void {
+  const storage = safeStorage();
+  storage?.removeItem(STORAGE_KEYS.lastUsedListId);
 }
 
 export function getAvailabilityCache(): Record<string, AvailabilityResult> {

@@ -161,6 +161,14 @@ label {
   margin-bottom: 0.75rem;
 }
 
+.list-heading {
+  align-items: start;
+}
+
+.list-heading h2 {
+  overflow-wrap: anywhere;
+}
+
 .field-label {
   font-weight: 600;
 }
@@ -184,6 +192,9 @@ label {
 .service-chip,
 .list-pill {
   background: var(--panel-muted);
+}
+
+.service-chip {
   padding: 0.8rem 0.95rem;
 }
 
@@ -218,10 +229,44 @@ label {
 }
 
 .list-pill {
-  display: grid;
-  gap: 0.2rem;
-  text-align: left;
+  display: flex;
+  align-items: stretch;
   min-width: 10rem;
+  overflow: hidden;
+}
+
+.list-select,
+.list-delete {
+  border-radius: 0;
+  color: inherit;
+}
+
+.list-select {
+  display: grid;
+  flex: 1;
+  gap: 0.2rem;
+  min-width: 0;
+  padding: 0.8rem 0.95rem;
+  text-align: left;
+  background: transparent;
+}
+
+.list-select span {
+  overflow-wrap: anywhere;
+}
+
+.list-delete {
+  width: 2.6rem;
+  border-left: 1px solid var(--border);
+  background: rgba(15, 23, 42, 0.24);
+  font-size: 1.2rem;
+  font-weight: 700;
+}
+
+.list-delete:hover,
+.list-delete:focus-visible {
+  background: rgba(252, 165, 165, 0.18);
+  color: var(--danger);
 }
 
 .toggle-row {
@@ -229,6 +274,11 @@ label {
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
+}
+
+.toggle-copy {
+  display: grid;
+  gap: 0.25rem;
 }
 
 .toggle-button {
@@ -318,6 +368,10 @@ label {
   .section-heading {
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: start;
+  }
+
+  .list-heading {
+    grid-template-columns: minmax(10rem, 0.8fr) minmax(18rem, 1.2fr);
   }
 
   .service-chip {

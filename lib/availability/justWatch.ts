@@ -25,8 +25,7 @@ const SERVICE_NAME_MAP: Record<string, StreamingService> = {
   paramount: "Paramount+",
   "paramount plus": "Paramount+",
   "paramount+": "Paramount+",
-  "criterion channel": "Criterion Channel",
-  mubi: "MUBI",
+  kanopy: "Kanopy",
 };
 
 export async function fetchJustWatchAvailability(movieId: string, title: string, year?: number): Promise<AvailabilityResult> {

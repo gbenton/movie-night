@@ -33,3 +33,27 @@ test("storage round-trips with a mocked localStorage", () => {
   // @ts-expect-error test cleanup
   delete globalThis.window;
 });
+
+test("storage ignores stale or unknown selected services", () => {
+  const store = new Map<string, string>([
+    ["movie-night:selected-services", JSON.stringify(["Netflix", "Criterion Channel", "MUBI", "Kanopy", "Bogus"])],
+  ]);
+  const localStorage = {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, value: string) => void store.set(key, value),
+    removeItem: (key: string) => void store.delete(key),
+    clear: () => void store.clear(),
+    key: (index: number) => Array.from(store.keys())[index] ?? null,
+    get length() {
+      return store.size;
+    },
+  } satisfies Storage;
+
+  Object.assign(globalThis, { window: { localStorage } });
+
+  assert.deepEqual(getSelectedServices(), ["Netflix", "Kanopy"]);
+
+  // cleanup
+  // @ts-expect-error test cleanup
+  delete globalThis.window;
+});
