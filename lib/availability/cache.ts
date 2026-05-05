@@ -6,6 +6,10 @@ export function isAvailabilityFresh(entry?: AvailabilityResult): boolean {
     return false;
   }
 
+  if (entry.status === "unknown") {
+    return false;
+  }
+
   const checkedAt = Date.parse(entry.lastCheckedAt);
   if (Number.isNaN(checkedAt)) {
     return false;

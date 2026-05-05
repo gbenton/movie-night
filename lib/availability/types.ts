@@ -1,37 +1,21 @@
-export interface JustWatchSearchCandidate {
-  id?: string;
-  objectId?: number;
-  objectType?: string;
-  content?: {
-    title?: string;
-    fullPath?: string;
-    originalReleaseYear?: number;
-    posterUrl?: string;
-  };
-  title?: string;
-  fullPath?: string;
-  originalReleaseYear?: number;
-  posterUrl?: string;
-  scoring?: number;
-  offers?: Array<{
-    package?: {
-      clearName?: string;
-      technicalName?: string;
-    };
-    standardWebURL?: string;
-    deeplinkRoku?: string;
-    deeplinkAndroidTV?: string;
-  }>;
+export interface JustWatchJsonLdMovie {
+  "@type"?: string;
+  "@id"?: string;
+  name?: string;
+  dateCreated?: string;
+  image?: string;
+  potentialAction?: JustWatchPotentialAction | JustWatchPotentialAction[];
 }
 
-export interface JustWatchSearchResponse {
-  items?: JustWatchSearchCandidate[];
-  data?: {
-    popularTitles?: {
-      edges?: Array<{
-        node?: JustWatchSearchCandidate;
-      }>;
+export interface JustWatchPotentialAction {
+  "@type"?: string;
+  target?: {
+    urlTemplate?: string;
+  };
+  expectsAcceptanceOf?: {
+    businessFunction?: string;
+    offeredBy?: {
+      name?: string;
     };
   };
-  errors?: Array<unknown>;
 }

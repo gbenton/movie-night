@@ -1,219 +1,249 @@
 import { slugifyTitle } from "../normalize";
 import type { AvailabilityResult, StreamingService } from "../types";
-import type { JustWatchSearchCandidate, JustWatchSearchResponse } from "./types";
+import type { JustWatchJsonLdMovie, JustWatchPotentialAction } from "./types";
 
-const JUSTWATCH_GRAPHQL_URL = "https://apis.justwatch.com/graphql";
-const COUNTRY_CODE = "US";
-const LANGUAGE_CODE = "en";
+const JUSTWATCH_MOVIE_URL = "https://www.justwatch.com/us/movie";
 
-const SEARCH_QUERY = `
-  query GetSearchTitles(
-    $searchTitlesFilter: TitleFilter!
-    $country: Country!
-    $language: Language!
-    $first: Int!
-    $filter: OfferFilter!
-  ) {
-    popularTitles(
-      country: $country
-      filter: $searchTitlesFilter
-      first: $first
-      sortBy: POPULAR
-      sortRandomSeed: 0
-    ) {
-      edges {
-        node {
-          id
-          objectId
-          objectType
-          content(country: $country, language: $language) {
-            title
-            fullPath
-            originalReleaseYear
-            posterUrl
-          }
-          offers(country: $country, platform: WEB, filter: $filter) {
-            standardWebURL
-            deeplinkRoku: deeplinkURL(platform: ROKU_OS)
-            package {
-              clearName
-              technicalName
-              shortName
-              slug
-            }
-          }
-        }
-      }
-    }
-  }
-`;
+const STREAMING_BUSINESS_FUNCTIONS = new Set([
+  "https://schema.org/ProvideService",
+  "http://purl.org/goodrelations/v1#ProvideService",
+]);
 
-const PROVIDER_NAME_MAP: Record<string, StreamingService> = {
+const SERVICE_NAME_MAP: Record<string, StreamingService> = {
   netflix: "Netflix",
   hulu: "Hulu",
-  amazon_prime_video: "Prime Video",
-  amazonprime: "Prime Video",
+  "amazon prime video": "Prime Video",
+  "prime video": "Prime Video",
   max: "Max",
-  disney_plus: "Disney+",
-  disneyplus: "Disney+",
-  apple_tv_plus: "Apple TV+",
-  appletvplus: "Apple TV+",
-  peacock_premium: "Peacock",
-  peacocktv: "Peacock",
-  peacocktvpremium: "Peacock",
-  paramount_plus: "Paramount+",
-  paramountpluspremium: "Paramount+",
-  paramountplusessential: "Paramount+",
+  "hbo max": "Max",
+  "disney plus": "Disney+",
+  "disney+": "Disney+",
+  "apple tv plus": "Apple TV+",
+  "apple tv+": "Apple TV+",
+  "peacock premium": "Peacock",
+  peacock: "Peacock",
+  paramount: "Paramount+",
+  "paramount plus": "Paramount+",
+  "paramount+": "Paramount+",
   kanopy: "Kanopy",
 };
 
 export async function fetchJustWatchAvailability(movieId: string, title: string, year?: number): Promise<AvailabilityResult> {
   try {
-    const response = await fetch(JUSTWATCH_GRAPHQL_URL, {
-      method: "POST",
+    const candidate = await fetchBestJustWatchPage(title, year);
+
+    if (!candidate) {
+      return buildFallbackAvailability(movieId, title, year, "unavailable");
+    }
+
+    const services = extractServices(candidate.movie);
+    const providerLinks = extractProviderLinks(candidate.movie);
+
+    return {
+      movieId,
+      title: candidate.movie.name ?? title,
+      year: extractYear(candidate.movie.dateCreated) ?? year,
+      services,
+      providerLinks,
+      justWatchUrl: candidate.url,
+      posterUrl: candidate.movie.image,
+      lastCheckedAt: new Date().toISOString(),
+      status: services.length > 0 ? "available" : "unavailable",
+      matchConfidence: deriveConfidence(candidate.movie, title, year),
+    };
+  } catch (error) {
+    console.error("JustWatch lookup failed", { movieId, title, year, error });
+    return buildFallbackAvailability(movieId, title, year, "unknown");
+  }
+}
+
+async function fetchBestJustWatchPage(
+  title: string,
+  year?: number,
+): Promise<{ movie: JustWatchJsonLdMovie; url: string } | undefined> {
+  const urls = buildCandidateUrls(title, year);
+  let bestCandidate: { movie: JustWatchJsonLdMovie; url: string; score: number } | undefined;
+
+  for (const url of urls) {
+    const response = await fetch(url, {
       headers: {
-        "Content-Type": "application/json",
+        Accept: "text/html,application/xhtml+xml",
         "User-Agent": "Mozilla/5.0",
       },
-      body: JSON.stringify({
-        operationName: "GetSearchTitles",
-        variables: {
-          first: 5,
-          searchTitlesFilter: { searchQuery: title },
-          country: COUNTRY_CODE,
-          language: LANGUAGE_CODE,
-          filter: { bestOnly: true },
-        },
-        query: SEARCH_QUERY,
-      }),
       next: { revalidate: 0 },
     });
 
     if (!response.ok) {
-      throw new Error(`JustWatch request failed with ${response.status}`);
-    }
-
-    const data = (await response.json()) as JustWatchSearchResponse;
-    if (data.errors?.length) {
-      throw new Error("JustWatch GraphQL response contained errors");
-    }
-
-    const candidate = chooseBestCandidate(extractCandidates(data), title, year);
-
-    if (!candidate) {
-      return buildFallbackAvailability(movieId, title, year);
-    }
-
-    const services = extractServices(candidate);
-    const providerLinks = extractProviderLinks(candidate);
-
-    return {
-      movieId,
-      title: getCandidateTitle(candidate) ?? title,
-      year: getCandidateYear(candidate) ?? year,
-      services,
-      providerLinks,
-      justWatchUrl: buildCandidateUrl(candidate, title),
-      posterUrl: getCandidatePosterUrl(candidate),
-      lastCheckedAt: new Date().toISOString(),
-      status: services.length > 0 ? "available" : "unavailable",
-      matchConfidence: deriveConfidence(candidate, title, year),
-    };
-  } catch (error) {
-    console.error("JustWatch lookup failed", { movieId, title, year, error });
-    return buildFallbackAvailability(movieId, title, year);
-  }
-}
-
-function extractCandidates(data: JustWatchSearchResponse): JustWatchSearchCandidate[] {
-  if (data.items) {
-    return data.items;
-  }
-
-  return data.data?.popularTitles?.edges?.map((edge) => edge.node).filter((node): node is JustWatchSearchCandidate => Boolean(node)) ?? [];
-}
-
-function chooseBestCandidate(candidates: JustWatchSearchCandidate[], title: string, year?: number): JustWatchSearchCandidate | undefined {
-  const normalizedTitle = title.trim().toLowerCase();
-
-  const scored = candidates
-    .filter((candidate) => (candidate.objectType ?? "movie").toLowerCase() === "movie")
-    .map((candidate) => {
-      let score = 0;
-      const candidateTitle = (getCandidateTitle(candidate) ?? "").trim().toLowerCase();
-      if (candidateTitle === normalizedTitle) {
-        score += 4;
-      } else if (candidateTitle.includes(normalizedTitle) || normalizedTitle.includes(candidateTitle)) {
-        score += 2;
-      }
-
-      if (typeof year === "number" && getCandidateYear(candidate) === year) {
-        score += 3;
-      }
-
-      if (typeof candidate.scoring === "number") {
-        score += Math.min(candidate.scoring, 1);
-      }
-
-      if ((candidate.offers?.length ?? 0) > 0) {
-        score += 0.5;
-      }
-
-      return { candidate, score };
-    })
-    .sort((left, right) => right.score - left.score);
-
-  return scored[0]?.candidate;
-}
-
-function extractServices(candidate: JustWatchSearchCandidate): StreamingService[] {
-  const mapped = new Set<StreamingService>();
-
-  for (const offer of candidate.offers ?? []) {
-    const provider = getProviderKey(offer.package);
-    if (!provider) {
       continue;
     }
 
-    mapped.add(PROVIDER_NAME_MAP[provider] ?? "Other");
+    const html = await response.text();
+    const movie = extractJsonLdMovie(html);
+    if (!movie) {
+      continue;
+    }
+
+    const score = scoreMovie(movie, title, year);
+    if (!bestCandidate || score > bestCandidate.score) {
+      bestCandidate = { movie, url: extractCanonicalUrl(html) ?? url, score };
+    }
+
+    if (score >= 7) {
+      break;
+    }
+  }
+
+  return bestCandidate && bestCandidate.score >= 4
+    ? { movie: bestCandidate.movie, url: bestCandidate.url }
+    : undefined;
+}
+
+function buildCandidateUrls(title: string, year?: number): string[] {
+  const slug = slugifyTitle(title);
+  const urls = [`${JUSTWATCH_MOVIE_URL}/${slug}`];
+
+  if (typeof year === "number") {
+    urls.unshift(`${JUSTWATCH_MOVIE_URL}/${slug}-${year}`);
+  }
+
+  return Array.from(new Set(urls));
+}
+
+function extractJsonLdMovie(html: string): JustWatchJsonLdMovie | undefined {
+  const scripts = html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi);
+
+  for (const script of scripts) {
+    try {
+      const value = JSON.parse(script[1]) as unknown;
+      const movie = findMovieJsonLd(value);
+      if (movie) {
+        return movie;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return undefined;
+}
+
+function findMovieJsonLd(value: unknown): JustWatchJsonLdMovie | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const movie = findMovieJsonLd(item);
+      if (movie) {
+        return movie;
+      }
+    }
+    return undefined;
+  }
+
+  const candidate = value as JustWatchJsonLdMovie & { "@graph"?: unknown };
+  if (candidate["@type"] === "Movie") {
+    return candidate;
+  }
+
+  return findMovieJsonLd(candidate["@graph"]);
+}
+
+function extractCanonicalUrl(html: string): string | undefined {
+  const match = html.match(/<link[^>]+rel=["']canonical["'][^>]+href=["']([^"']+)["']/i);
+  return match ? decodeHtmlEntities(match[1]) : undefined;
+}
+
+function scoreMovie(candidate: JustWatchJsonLdMovie, title: string, year?: number): number {
+  let score = 0;
+  const candidateTitle = (candidate.name ?? "").trim().toLowerCase();
+  const normalizedTitle = title.trim().toLowerCase();
+  const candidateYear = extractYear(candidate.dateCreated);
+
+  if (typeof year === "number" && typeof candidateYear === "number" && candidateYear !== year) {
+    return 0;
+  }
+
+  if (candidateTitle === normalizedTitle) {
+    score += 4;
+  } else if (candidateTitle.includes(normalizedTitle) || normalizedTitle.includes(candidateTitle)) {
+    score += 2;
+  }
+
+  if (typeof year === "number" && candidateYear === year) {
+    score += 3;
+  }
+
+  if (extractPotentialActions(candidate).some(isStreamingAction)) {
+    score += 1;
+  }
+
+  return score;
+}
+
+function extractServices(candidate: JustWatchJsonLdMovie): StreamingService[] {
+  const mapped = new Set<StreamingService>();
+
+  for (const action of extractPotentialActions(candidate)) {
+    if (!isStreamingAction(action)) {
+      continue;
+    }
+
+    const providerName = action.expectsAcceptanceOf?.offeredBy?.name;
+    if (!providerName) {
+      continue;
+    }
+
+    mapped.add(mapServiceName(providerName));
   }
 
   return Array.from(mapped);
 }
 
-function extractProviderLinks(candidate: JustWatchSearchCandidate): Record<string, string> | undefined {
-  const entries = (candidate.offers ?? [])
-    .map((offer) => {
-      const name = offer.package?.clearName;
-      const url = offer.standardWebURL ?? offer.deeplinkAndroidTV ?? offer.deeplinkRoku;
+function extractProviderLinks(candidate: JustWatchJsonLdMovie): Record<string, string> | undefined {
+  const entries = extractPotentialActions(candidate)
+    .filter(isStreamingAction)
+    .map((action) => {
+      const name = action.expectsAcceptanceOf?.offeredBy?.name;
+      const url = action.target?.urlTemplate;
       if (!name || !url) {
         return undefined;
       }
-      return [name, url] as const;
+      return [name, decodeHtmlEntities(url)] as const;
     })
     .filter((entry): entry is readonly [string, string] => Boolean(entry));
 
   return entries.length ? Object.fromEntries(entries) : undefined;
 }
 
-function buildCandidateUrl(candidate: JustWatchSearchCandidate, title: string): string {
-  const fullPath = candidate.fullPath ?? candidate.content?.fullPath;
-  if (fullPath) {
-    return `https://www.justwatch.com${fullPath}`;
+function extractPotentialActions(candidate: JustWatchJsonLdMovie): JustWatchPotentialAction[] {
+  if (!candidate.potentialAction) {
+    return [];
   }
 
-  return buildFallbackJustWatchUrl(getCandidateTitle(candidate) ?? title);
+  return Array.isArray(candidate.potentialAction) ? candidate.potentialAction : [candidate.potentialAction];
 }
 
-function buildFallbackJustWatchUrl(title: string): string {
-  return `https://www.justwatch.com/us/search?q=${encodeURIComponent(slugifyTitle(title).replace(/-/g, " "))}`;
+function isStreamingAction(action: JustWatchPotentialAction): boolean {
+  if (action["@type"] !== "WatchAction") {
+    return false;
+  }
+
+  const businessFunction = action.expectsAcceptanceOf?.businessFunction;
+  return Boolean(businessFunction && STREAMING_BUSINESS_FUNCTIONS.has(businessFunction));
 }
 
-function deriveConfidence(candidate: JustWatchSearchCandidate, title: string, year?: number): "high" | "medium" | "low" {
-  const candidateTitle = (getCandidateTitle(candidate) ?? "").trim().toLowerCase();
+function mapServiceName(providerName: string): StreamingService {
+  return SERVICE_NAME_MAP[providerName.trim().toLowerCase()] ?? "Other";
+}
+
+function deriveConfidence(candidate: JustWatchJsonLdMovie, title: string, year?: number): "high" | "medium" | "low" {
+  const candidateTitle = (candidate.name ?? "").trim().toLowerCase();
   const normalizedTitle = title.trim().toLowerCase();
+  const candidateYear = extractYear(candidate.dateCreated);
 
-  if (candidateTitle === normalizedTitle && (!year || getCandidateYear(candidate) === year)) {
+  if (candidateTitle === normalizedTitle && (!year || candidateYear === year)) {
     return "high";
   }
 
@@ -224,32 +254,39 @@ function deriveConfidence(candidate: JustWatchSearchCandidate, title: string, ye
   return "low";
 }
 
-function getCandidateTitle(candidate: JustWatchSearchCandidate): string | undefined {
-  return candidate.title ?? candidate.content?.title;
+function extractYear(dateCreated?: string): number | undefined {
+  const match = dateCreated?.match(/^(\d{4})/);
+  return match ? Number(match[1]) : undefined;
 }
 
-function getCandidateYear(candidate: JustWatchSearchCandidate): number | undefined {
-  return candidate.originalReleaseYear ?? candidate.content?.originalReleaseYear;
-}
-
-function getCandidatePosterUrl(candidate: JustWatchSearchCandidate): string | undefined {
-  const posterUrl = candidate.posterUrl ?? candidate.content?.posterUrl;
-  return posterUrl?.replace("{profile}", "s718").replace("{format}", "jpg");
-}
-
-function getProviderKey(provider?: { clearName?: string; technicalName?: string; shortName?: string; slug?: string }): string | undefined {
-  return provider?.technicalName ?? provider?.slug?.replace(/-/g, "_") ?? provider?.clearName?.toLowerCase().replace(/\s+/g, "_");
-}
-
-function buildFallbackAvailability(movieId: string, title: string, year?: number): AvailabilityResult {
+function buildFallbackAvailability(
+  movieId: string,
+  title: string,
+  year: number | undefined,
+  status: "unavailable" | "unknown",
+): AvailabilityResult {
   return {
     movieId,
     title,
     year,
     services: [],
     lastCheckedAt: new Date().toISOString(),
-    status: "unavailable",
+    status,
     matchConfidence: "low",
     justWatchUrl: buildFallbackJustWatchUrl(title),
   };
+}
+
+function buildFallbackJustWatchUrl(title: string): string {
+  return `https://www.justwatch.com/us/search?q=${encodeURIComponent(slugifyTitle(title).replace(/-/g, " "))}`;
+}
+
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&quot;/g, "\"")
+    .replace(/&#x27;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
 }
