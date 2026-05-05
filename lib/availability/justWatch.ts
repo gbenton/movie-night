@@ -1,33 +1,16 @@
 import { slugifyTitle } from "../normalize";
+import { mapProviderName } from "../providerLinks";
 import type { AvailabilityResult, StreamingService } from "../types";
 import type { JustWatchJsonLdMovie, JustWatchPotentialAction } from "./types";
 
 const JUSTWATCH_MOVIE_URL = "https://www.justwatch.com/us/movie";
 const JUSTWATCH_SEARCH_URL = "https://www.justwatch.com/us/search";
+const JUSTWATCH_REQUEST_TIMEOUT_MS = 5_000;
 
 const STREAMING_BUSINESS_FUNCTIONS = new Set([
   "https://schema.org/ProvideService",
   "http://purl.org/goodrelations/v1#ProvideService",
 ]);
-
-const SERVICE_NAME_MAP: Record<string, StreamingService> = {
-  netflix: "Netflix",
-  hulu: "Hulu",
-  "amazon prime video": "Prime Video",
-  "prime video": "Prime Video",
-  max: "Max",
-  "hbo max": "Max",
-  "disney plus": "Disney+",
-  "disney+": "Disney+",
-  "apple tv plus": "Apple TV+",
-  "apple tv+": "Apple TV+",
-  "peacock premium": "Peacock",
-  peacock: "Peacock",
-  paramount: "Paramount+",
-  "paramount plus": "Paramount+",
-  "paramount+": "Paramount+",
-  kanopy: "Kanopy",
-};
 
 export async function fetchJustWatchAvailability(movieId: string, title: string, year?: number): Promise<AvailabilityResult> {
   try {
@@ -66,13 +49,7 @@ async function fetchBestJustWatchPage(
   let bestCandidate: { movie: JustWatchJsonLdMovie; url: string; score: number } | undefined;
 
   async function inspectUrl(url: string): Promise<boolean> {
-    const response = await fetch(url, {
-      headers: {
-        Accept: "text/html,application/xhtml+xml",
-        "User-Agent": "Mozilla/5.0",
-      },
-      next: { revalidate: 0 },
-    });
+    const response = await fetchJustWatchHtml(url);
 
     if (!response.ok) {
       return false;
@@ -128,19 +105,24 @@ function buildCandidateUrls(title: string, year?: number): string[] {
 }
 
 async function fetchSearchResultUrls(title: string): Promise<string[]> {
-  const response = await fetch(`${JUSTWATCH_SEARCH_URL}?q=${encodeURIComponent(title)}`, {
-    headers: {
-      Accept: "text/html,application/xhtml+xml",
-      "User-Agent": "Mozilla/5.0",
-    },
-    next: { revalidate: 0 },
-  });
+  const response = await fetchJustWatchHtml(`${JUSTWATCH_SEARCH_URL}?q=${encodeURIComponent(title)}`);
 
   if (!response.ok) {
     return [];
   }
 
   return extractMovieUrls(await response.text()).slice(0, 8);
+}
+
+function fetchJustWatchHtml(url: string): Promise<Response> {
+  return fetch(url, {
+    headers: {
+      Accept: "text/html,application/xhtml+xml",
+      "User-Agent": "Mozilla/5.0",
+    },
+    next: { revalidate: 0 },
+    signal: AbortSignal.timeout(JUSTWATCH_REQUEST_TIMEOUT_MS),
+  });
 }
 
 function extractMovieUrls(html: string): string[] {
@@ -244,7 +226,7 @@ function extractServices(candidate: JustWatchJsonLdMovie): StreamingService[] {
       continue;
     }
 
-    mapped.add(mapServiceName(providerName));
+    mapped.add(mapProviderName(providerName));
   }
 
   return Array.from(mapped);
@@ -259,9 +241,9 @@ function extractProviderLinks(candidate: JustWatchJsonLdMovie): Record<string, s
       if (!name || !url) {
         return undefined;
       }
-      return [name, decodeHtmlEntities(url)] as const;
+      return [mapProviderName(name), decodeHtmlEntities(url)] as const;
     })
-    .filter((entry): entry is readonly [string, string] => Boolean(entry));
+    .filter((entry): entry is readonly [StreamingService, string] => Boolean(entry));
 
   return entries.length ? Object.fromEntries(entries) : undefined;
 }
@@ -281,10 +263,6 @@ function isStreamingAction(action: JustWatchPotentialAction): boolean {
 
   const businessFunction = action.expectsAcceptanceOf?.businessFunction;
   return Boolean(businessFunction && STREAMING_BUSINESS_FUNCTIONS.has(businessFunction));
-}
-
-function mapServiceName(providerName: string): StreamingService {
-  return SERVICE_NAME_MAP[providerName.trim().toLowerCase()] ?? "Other";
 }
 
 function deriveConfidence(candidate: JustWatchJsonLdMovie, title: string, year?: number): "high" | "medium" | "low" {

@@ -1,4 +1,5 @@
 import type { DisplayMovie, StreamingService } from "../lib/types";
+import { selectProviderLink } from "../lib/providerLinks";
 
 interface MovieRowProps {
   movie: DisplayMovie;
@@ -10,9 +11,10 @@ export function MovieRow({ movie, selectedServices }: MovieRowProps) {
   const serviceSet = selectedServices.length > 0 ? selectedServices : availability?.services ?? [];
   const matchedServices = availability?.services.filter((service) => serviceSet.includes(service)) ?? [];
   const displayServices = matchedServices.length > 0 ? matchedServices : availability?.services ?? [];
-  const link = firstLink(availability?.providerLinks) ?? availability?.justWatchUrl;
+  const link = selectProviderLink(availability?.providerLinks, availability?.services ?? [], selectedServices) ?? availability?.justWatchUrl;
   const unavailable = availability?.status !== "available";
   const watchLabel = availability?.providerLinks ? "Watch" : link ? "Search" : undefined;
+  const emptyServiceLabel = getEmptyServiceLabel(availability);
 
   return (
     <article className={`movie-row ${unavailable ? "muted" : ""}`}>
@@ -32,12 +34,12 @@ export function MovieRow({ movie, selectedServices }: MovieRowProps) {
               </span>
             ))
           ) : (
-            <span className="service-badge unavailable">Not on your services</span>
+            <span className="service-badge unavailable">{emptyServiceLabel}</span>
           )}
         </div>
       </div>
       {link && watchLabel ? (
-        <a className="watch-link" href={link} target="_blank" rel="noreferrer">
+        <a className="watch-link" href={link}>
           {watchLabel}
         </a>
       ) : null}
@@ -45,10 +47,14 @@ export function MovieRow({ movie, selectedServices }: MovieRowProps) {
   );
 }
 
-function firstLink(providerLinks?: Record<string, string>): string | undefined {
-  if (!providerLinks) {
-    return undefined;
+function getEmptyServiceLabel(availability: DisplayMovie["availability"]): string {
+  if (!availability || (availability.status === "unavailable" && !availability.justWatchUrl && !availability.providerLinks)) {
+    return "Checking availability";
   }
 
-  return Object.values(providerLinks)[0];
+  if (availability.status === "unknown") {
+    return "Availability unknown";
+  }
+
+  return "Not on your services";
 }
