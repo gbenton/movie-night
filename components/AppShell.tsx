@@ -21,8 +21,9 @@ import {
 } from "../lib/storage";
 import type { AvailabilityResult, MovieItem, MovieList, StreamingService } from "../lib/types";
 
-const AVAILABILITY_LOOKUP_CONCURRENCY = 4;
-const AVAILABILITY_CLIENT_TIMEOUT_MS = 8_000;
+const AVAILABILITY_LOOKUP_CONCURRENCY = 2;
+const AVAILABILITY_LOOKUP_SPACING_MS = 200;
+const AVAILABILITY_CLIENT_TIMEOUT_MS = 12_000;
 
 export function AppShell() {
   const [selectedServices, setSelectedServicesState] = useState<StreamingService[]>([]);
@@ -146,6 +147,7 @@ export function AppShell() {
           }
 
           await lookupMovie(movie);
+          await delay(AVAILABILITY_LOOKUP_SPACING_MS);
         }
       }
 
@@ -248,4 +250,8 @@ export function AppShell() {
       </div>
     </main>
   );
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -2,6 +2,7 @@ import type { StreamingService } from "./types";
 
 const PROVIDER_NAME_MAP: Record<string, StreamingService> = {
   netflix: "Netflix",
+  "netflix standard with ads": "Netflix",
   hulu: "Hulu",
   "amazon prime video": "Prime Video",
   "prime video": "Prime Video",
@@ -15,7 +16,10 @@ const PROVIDER_NAME_MAP: Record<string, StreamingService> = {
   peacock: "Peacock",
   paramount: "Paramount+",
   "paramount plus": "Paramount+",
+  "paramount plus essential": "Paramount+",
+  "paramount plus premium": "Paramount+",
   "paramount+": "Paramount+",
+  "paramount+ amazon channel": "Paramount+",
   kanopy: "Kanopy",
 };
 
