@@ -14,6 +14,10 @@ export function isAvailabilityFresh(entry?: AvailabilityResult): boolean {
     return false;
   }
 
+  if (entry.status === "unavailable" && entry.services.length === 0 && entry.matchConfidence === "low") {
+    return false;
+  }
+
   const checkedAt = Date.parse(entry.lastCheckedAt);
   if (Number.isNaN(checkedAt)) {
     return false;

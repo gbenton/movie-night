@@ -54,13 +54,29 @@ test("isAvailabilityFresh returns false for failed empty unavailable entries", (
   );
 });
 
-test("isAvailabilityFresh returns true for unavailable JustWatch results with a fallback URL", () => {
+test("isAvailabilityFresh returns false for low-confidence unavailable fallback results", () => {
   assert.equal(
     isAvailabilityFresh({
       movieId: "heat",
       title: "Heat",
       services: [],
       justWatchUrl: "https://www.justwatch.com/us/search?q=heat",
+      matchConfidence: "low",
+      lastCheckedAt: new Date().toISOString(),
+      status: "unavailable",
+    }),
+    false,
+  );
+});
+
+test("isAvailabilityFresh returns true for confident unavailable JustWatch matches", () => {
+  assert.equal(
+    isAvailabilityFresh({
+      movieId: "heat",
+      title: "Heat",
+      services: [],
+      justWatchUrl: "https://www.justwatch.com/us/movie/heat",
+      matchConfidence: "high",
       lastCheckedAt: new Date().toISOString(),
       status: "unavailable",
     }),
