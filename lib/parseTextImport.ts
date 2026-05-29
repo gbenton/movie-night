@@ -1,7 +1,7 @@
 import { createMovieId } from "./normalize";
 import type { MovieItem, MovieList } from "./types";
 
-const RANK_PATTERN = /^\s*(\d+)[\).\-\s]+/;
+const RANK_PATTERN = /^\s*(\d+)(?:[.)]|\s*-\s+)\s*/;
 const YEAR_PATTERN = /\((\d{4})\)\s*$/;
 
 export function parseTextImport(input: string): MovieItem[] {
@@ -9,25 +9,26 @@ export function parseTextImport(input: string): MovieItem[] {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
-    .map((line) => {
+    .map((line, index): MovieItem | undefined => {
       const rankMatch = line.match(RANK_PATTERN);
       const yearMatch = line.match(YEAR_PATTERN);
       const rank = rankMatch ? Number.parseInt(rankMatch[1], 10) : undefined;
       const year = yearMatch ? Number.parseInt(yearMatch[1], 10) : undefined;
 
-      let title = line.replace(RANK_PATTERN, "").replace(YEAR_PATTERN, "").trim();
+      const title = line.replace(RANK_PATTERN, "").replace(YEAR_PATTERN, "").trim();
       if (!title) {
-        title = line.trim();
+        return undefined;
       }
 
       return {
-        id: createMovieId(title, year),
+        id: `${createMovieId(title, year)}__row-${index + 1}`,
         title,
         year,
         rank,
         originalLine: line,
       } satisfies MovieItem;
-    });
+    })
+    .filter((movie): movie is MovieItem => Boolean(movie));
 }
 
 export function createMovieListFromText(name: string, input: string): MovieList {

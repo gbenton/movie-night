@@ -55,7 +55,7 @@ function normalizeJsonItem(item: unknown, index: number): MovieItem {
   const year = typeof candidate.year === "number" ? candidate.year : undefined;
 
   return {
-    id: createMovieId(title, year),
+    id: `${createMovieId(title, year)}__row-${index + 1}`,
     title,
     rank,
     year,

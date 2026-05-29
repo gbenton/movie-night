@@ -289,11 +289,12 @@ function extractYear(dateCreated?: unknown): number | undefined {
 
 function getText(value: unknown): string | undefined {
   if (typeof value === "string") {
-    return value;
+    return decodeHtmlEntities(value);
   }
 
   if (Array.isArray(value)) {
-    return value.find((item): item is string => typeof item === "string");
+    const text = value.find((item): item is string => typeof item === "string");
+    return text ? decodeHtmlEntities(text) : undefined;
   }
 
   return undefined;
