@@ -35,6 +35,7 @@ export function AppShell() {
   const lookupRunIdRef = useRef(0);
   const inFlightAvailabilityKeysRef = useRef(new Set<string>());
   const skipNextAvailabilityCacheWriteRef = useRef(true);
+  const availabilityCacheRef = useRef<Record<string, AvailabilityResult>>({});
 
   useEffect(() => {
     setSelectedServicesState(getSelectedServices());
@@ -42,6 +43,10 @@ export function AppShell() {
     setLastUsedListIdState(getLastUsedListId());
     setAvailabilityCacheState(getAvailabilityCache());
   }, []);
+
+  useEffect(() => {
+    availabilityCacheRef.current = availabilityCache;
+  }, [availabilityCache]);
 
   const activeList = useMemo(
     () => lists.find((list) => list.id === lastUsedListId) ?? lists[0],
@@ -71,10 +76,11 @@ export function AppShell() {
     const runId = lookupRunIdRef.current + 1;
     lookupRunIdRef.current = runId;
 
+    const currentAvailabilityCache = availabilityCacheRef.current;
     const staleMovieByKey = new Map<string, MovieItem>();
     for (const movie of activeList.movies) {
       const key = createMovieId(movie.title, movie.year);
-      const availability = availabilityCache[key];
+      const availability = currentAvailabilityCache[key];
       if (
         !inFlightAvailabilityKeysRef.current.has(key) &&
         !isAvailabilityFresh(availability)
