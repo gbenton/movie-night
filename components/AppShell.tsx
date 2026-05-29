@@ -31,7 +31,9 @@ export function AppShell() {
   const [availabilityCache, setAvailabilityCacheState] = useState<Record<string, AvailabilityResult>>({});
   const [showAll, setShowAll] = useState(false);
   const [loadingCount, setLoadingCount] = useState(0);
+  const lookupRunIdRef = useRef(0);
   const inFlightAvailabilityKeysRef = useRef(new Set<string>());
+  const skipNextAvailabilityCacheWriteRef = useRef(true);
 
   useEffect(() => {
     setSelectedServicesState(getSelectedServices());
@@ -47,6 +49,8 @@ export function AppShell() {
 
   useEffect(() => {
     if (!activeList) {
+      lookupRunIdRef.current += 1;
+      setLoadingCount(0);
       return;
     }
 
@@ -58,17 +62,27 @@ export function AppShell() {
 
   useEffect(() => {
     if (!activeList) {
+      lookupRunIdRef.current += 1;
+      setLoadingCount(0);
       return;
     }
 
-    const staleMovies = activeList.movies.filter((movie) => {
+    const runId = lookupRunIdRef.current + 1;
+    lookupRunIdRef.current = runId;
+
+    const staleMovieByKey = new Map<string, MovieItem>();
+    for (const movie of activeList.movies) {
       const key = createMovieId(movie.title, movie.year);
       const availability = availabilityCache[key];
-      return (
+      if (
         !inFlightAvailabilityKeysRef.current.has(key) &&
         !isAvailabilityFresh(availability)
-      );
-    });
+      ) {
+        staleMovieByKey.set(key, movie);
+      }
+    }
+
+    const staleMovies = Array.from(staleMovieByKey.values());
     if (staleMovies.length === 0) {
       setLoadingCount(0);
       return;
@@ -111,15 +125,14 @@ export function AppShell() {
         } finally {
           inFlightAvailabilityKeysRef.current.delete(key);
 
-          if (!cancelled) {
-            setAvailabilityCacheState((current) => {
-              const next = { ...current, [key]: update };
-              setAvailabilityCache(next);
-              return next;
-            });
-          }
+          setAvailabilityCacheState((current) => {
+            const next = { ...current, [key]: update };
+            return next;
+          });
 
-          setLoadingCount((current) => Math.max(current - 1, 0));
+          if (!cancelled && lookupRunIdRef.current === runId) {
+            setLoadingCount((current) => Math.max(current - 1, 0));
+          }
         }
       }
 
@@ -150,9 +163,18 @@ export function AppShell() {
     };
   }, [activeList]);
 
+  useEffect(() => {
+    if (skipNextAvailabilityCacheWriteRef.current) {
+      skipNextAvailabilityCacheWriteRef.current = false;
+      return;
+    }
+
+    setAvailabilityCache(availabilityCache);
+  }, [availabilityCache]);
+
   const visibleMovies = useMemo(
-    () => filterMovies({ list: activeList, selectedServices, availabilityByMovieKey: availabilityCache, showAll: showAll || loadingCount > 0 }),
-    [activeList, availabilityCache, loadingCount, selectedServices, showAll],
+    () => filterMovies({ list: activeList, selectedServices, availabilityByMovieKey: availabilityCache, showAll }),
+    [activeList, availabilityCache, selectedServices, showAll],
   );
 
   function handleToggleService(service: StreamingService) {

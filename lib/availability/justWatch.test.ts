@@ -252,3 +252,96 @@ test("fetchJustWatchAvailability prefers a stronger search result over a weak di
   assert.equal(result.justWatchUrl, "https://www.justwatch.com/us/movie/marie-antoinette-2006-0");
   assert.equal(result.matchConfidence, "high");
 });
+
+test("fetchJustWatchAvailability decodes HTML entities before scoring title matches", async () => {
+  const requestedUrls: string[] = [];
+
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    requestedUrls.push(url);
+
+    if (url.endsWith("/pan-s-labyrinth-2006") || url.endsWith("/pan-s-labyrinth")) {
+      return new Response("", { status: 404 });
+    }
+
+    if (url.includes("/search?")) {
+      return new Response(
+        `
+          <a href="/us/movie/the-devil-wears-prada">The Devil Wears Prada</a>
+          <a href="/us/movie/pans-labyrinth">Pan&#x27;s Labyrinth</a>
+        `,
+        { status: 200, headers: { "Content-Type": "text/html" } },
+      );
+    }
+
+    if (url.endsWith("/the-devil-wears-prada")) {
+      return new Response(
+        `
+          <head>
+            <link rel="canonical" href="https://www.justwatch.com/us/movie/the-devil-wears-prada">
+            <script type="application/ld+json">
+              {
+                "@type": "Movie",
+                "name": "The Devil Wears Prada",
+                "dateCreated": "2006-06-30",
+                "potentialAction": {
+                  "@type": "WatchAction",
+                  "target": { "@type": "EntryPoint", "urlTemplate": "https://play.hbomax.com/show/devil-wears-prada" },
+                  "expectsAcceptanceOf": {
+                    "@type": "Offer",
+                    "businessFunction": "https://schema.org/ProvideService",
+                    "offeredBy": { "@type": "Organization", "name": "HBO Max" }
+                  }
+                }
+              }
+            </script>
+          </head>
+        `,
+        { status: 200, headers: { "Content-Type": "text/html" } },
+      );
+    }
+
+    if (url.endsWith("/pans-labyrinth")) {
+      return new Response(
+        `
+          <head>
+            <link rel="canonical" href="https://www.justwatch.com/us/movie/pans-labyrinth">
+            <script type="application/ld+json">
+              {
+                "@type": "Movie",
+                "name": "Pan&#x27;s Labyrinth",
+                "dateCreated": "2006-10-11",
+                "potentialAction": {
+                  "@type": "WatchAction",
+                  "target": { "@type": "EntryPoint", "urlTemplate": "https://play.hbomax.com/show/pans-labyrinth" },
+                  "expectsAcceptanceOf": {
+                    "@type": "Offer",
+                    "businessFunction": "https://schema.org/ProvideService",
+                    "offeredBy": { "@type": "Organization", "name": "HBO Max" }
+                  }
+                }
+              }
+            </script>
+          </head>
+        `,
+        { status: 200, headers: { "Content-Type": "text/html" } },
+      );
+    }
+
+    return new Response("", { status: 404 });
+  };
+
+  const result = await fetchJustWatchAvailability("pans-labyrinth__2006", "Pan's Labyrinth", 2006);
+
+  assert.deepEqual(requestedUrls, [
+    "https://www.justwatch.com/us/movie/pan-s-labyrinth-2006",
+    "https://www.justwatch.com/us/movie/pan-s-labyrinth",
+    "https://www.justwatch.com/us/search?q=Pan's%20Labyrinth",
+    "https://www.justwatch.com/us/movie/the-devil-wears-prada",
+    "https://www.justwatch.com/us/movie/pans-labyrinth",
+  ]);
+  assert.equal(result.title, "Pan's Labyrinth");
+  assert.equal(result.justWatchUrl, "https://www.justwatch.com/us/movie/pans-labyrinth");
+  assert.equal(result.providerLinks?.Max, "https://play.hbomax.com/show/pans-labyrinth");
+  assert.equal(result.matchConfidence, "high");
+});

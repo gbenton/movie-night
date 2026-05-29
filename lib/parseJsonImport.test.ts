@@ -12,3 +12,15 @@ test("parseJsonImport accepts valid structured imports", () => {
 test("parseJsonImport rejects payloads without items", () => {
   assert.throws(() => parseJsonImport(JSON.stringify({ listName: "Favorites" })), /items/);
 });
+
+test("parseJsonImport creates unique row ids for duplicate movies", () => {
+  const list = parseJsonImport(JSON.stringify({
+    listName: "Duplicates",
+    items: [
+      { rank: 1, title: "Heat", year: 1995 },
+      { rank: 2, title: "Heat", year: 1995 },
+    ],
+  }));
+
+  assert.notEqual(list.movies[0].id, list.movies[1].id);
+});
