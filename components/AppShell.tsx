@@ -41,6 +41,7 @@ interface AppShellState {
   availabilityCache: Record<string, AvailabilityResult>;
   showAll: boolean;
   loadingCount: number;
+  retryCount: number;
 }
 
 type AppShellAction =
@@ -50,6 +51,7 @@ type AppShellAction =
   | { type: "deleteList"; listId: string; activeList?: MovieList }
   | { type: "setShowAll"; showAll: boolean }
   | { type: "setLoadingCount"; loadingCount: number }
+  | { type: "setRetryCount"; retryCount: number }
   | { type: "setAvailability"; movieKey: string; availability: AvailabilityResult };
 
 export function AppShell() {
@@ -77,6 +79,7 @@ export function AppShell() {
     if (!activeList) {
       lookupRunIdRef.current += 1;
       dispatch({ type: "setLoadingCount", loadingCount: 0 });
+      dispatch({ type: "setRetryCount", retryCount: 0 });
       return;
     }
 
@@ -99,12 +102,15 @@ export function AppShell() {
     const staleMovies = Array.from(staleMovieByKey.values());
     if (staleMovies.length === 0) {
       dispatch({ type: "setLoadingCount", loadingCount: 0 });
+      dispatch({ type: "setRetryCount", retryCount: 0 });
       return;
     }
 
     let cancelled = false;
     const foregroundPendingKeys = new Set(staleMovies.map((movie) => createMovieId(movie.title, movie.year)));
+    const retryPendingKeys = new Set<string>();
     dispatch({ type: "setLoadingCount", loadingCount: foregroundPendingKeys.size });
+    dispatch({ type: "setRetryCount", retryCount: 0 });
 
     (async () => {
       const queue: LookupQueueItem[] = staleMovies.map((movie) => ({ movie, attempt: 1 }));
@@ -127,7 +133,10 @@ export function AppShell() {
           markForegroundLookupFinished(key);
 
           if (!trusted && !exhausted) {
+            retryPendingKeys.add(key);
             queue.push({ movie, attempt: attempt + 1 });
+          } else {
+            retryPendingKeys.delete(key);
           }
 
           untrustedResultStreak = trusted ? 0 : untrustedResultStreak + 1;
@@ -140,7 +149,10 @@ export function AppShell() {
           }
 
           if (!exhausted) {
+            retryPendingKeys.add(key);
             queue.push({ movie, attempt: attempt + 1 });
+          } else {
+            retryPendingKeys.delete(key);
           }
 
           untrustedResultStreak += 1;
@@ -149,6 +161,7 @@ export function AppShell() {
 
           if (!cancelled && lookupRunIdRef.current === runId) {
             dispatch({ type: "setLoadingCount", loadingCount: foregroundPendingKeys.size });
+            dispatch({ type: "setRetryCount", retryCount: retryPendingKeys.size });
           }
         }
       }
@@ -185,6 +198,7 @@ export function AppShell() {
       }
 
       dispatch({ type: "setLoadingCount", loadingCount: 0 });
+      dispatch({ type: "setRetryCount", retryCount: 0 });
     })();
 
     return () => {
@@ -313,6 +327,7 @@ export function AppShell() {
           showAll={state.showAll}
           onToggleShowAll={(showAll) => dispatch({ type: "setShowAll", showAll })}
           loadingCount={state.loadingCount}
+          retryCount={state.retryCount}
         />
       </div>
     </main>
@@ -327,6 +342,7 @@ function createInitialAppShellState(): AppShellState {
     availabilityCache: getAvailabilityCache(),
     showAll: false,
     loadingCount: 0,
+    retryCount: 0,
   };
 }
 
@@ -372,6 +388,10 @@ function appShellReducer(state: AppShellState, action: AppShellAction): AppShell
       return state.loadingCount === action.loadingCount
         ? state
         : { ...state, loadingCount: action.loadingCount };
+    case "setRetryCount":
+      return state.retryCount === action.retryCount
+        ? state
+        : { ...state, retryCount: action.retryCount };
     case "setAvailability":
       return {
         ...state,

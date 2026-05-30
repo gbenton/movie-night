@@ -9,6 +9,7 @@ interface MovieListViewProps {
   showAll: boolean;
   onToggleShowAll: (nextValue: boolean) => void;
   loadingCount: number;
+  retryCount: number;
 }
 
 export function MovieListView({
@@ -18,7 +19,10 @@ export function MovieListView({
   showAll,
   onToggleShowAll,
   loadingCount,
+  retryCount,
 }: MovieListViewProps) {
+  const availabilityStatus = getAvailabilityStatus(loadingCount, retryCount);
+
   return (
     <section className="panel list-panel">
       <div className="section-heading list-heading">
@@ -30,7 +34,7 @@ export function MovieListView({
           <ShowAllToggle checked={showAll} onChange={onToggleShowAll} />
         </div>
       </div>
-      {loadingCount > 0 ? <p className="helper-text">Checking availability for {loadingCount} title(s)…</p> : null}
+      {availabilityStatus ? <p className="helper-text">{availabilityStatus}</p> : null}
       {!list ? (
         <div className="empty-state">
           <h3>No lists yet</h3>
@@ -54,4 +58,16 @@ export function MovieListView({
       )}
     </section>
   );
+}
+
+function getAvailabilityStatus(loadingCount: number, retryCount: number): string | undefined {
+  if (loadingCount > 0) {
+    return `Checking availability for ${loadingCount} title(s)...`;
+  }
+
+  if (retryCount > 0) {
+    return `First pass complete. Retrying ${retryCount} uncertain title(s) in the background...`;
+  }
+
+  return undefined;
 }
