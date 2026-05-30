@@ -38,6 +38,8 @@ export interface AvailabilityResult {
   lastCheckedAt: string;
   status: "available" | "unavailable" | "unknown";
   matchConfidence?: "high" | "medium" | "low";
+  failureReason?: "rate_limited" | "lookup_failed";
+  retryAfterMs?: number;
 }
 
 export interface AppState {

@@ -412,7 +412,7 @@ test("fetchJustWatchAvailability retries transient JustWatch responses", async (
     requestedUrls.push(url);
 
     if (requestedUrls.length === 1) {
-      return new Response("Too many requests", { status: 429 });
+      return new Response("Service unavailable", { status: 503 });
     }
 
     return new Response(
@@ -447,6 +447,29 @@ test("fetchJustWatchAvailability retries transient JustWatch responses", async (
   assert.equal(result.status, "available");
   assert.deepEqual(result.services, ["Kanopy"]);
   assert.equal(result.matchConfidence, "high");
+});
+
+test("fetchJustWatchAvailability marks sustained rate limits as retryable unknowns", async () => {
+  const originalConsoleError = console.error;
+  const requestedUrls: string[] = [];
+  globalThis.fetch = async (input) => {
+    requestedUrls.push(String(input));
+    return new Response("Too many requests", { status: 429 });
+  };
+
+  console.error = () => {};
+
+  try {
+    const result = await fetchJustWatchAvailability("ghostbusters", "Ghostbusters", 1984);
+
+    assert.deepEqual(requestedUrls, ["https://www.justwatch.com/us/movie/ghostbusters-1984"]);
+    assert.equal(result.status, "unknown");
+    assert.equal(result.failureReason, "rate_limited");
+    assert.equal(result.retryAfterMs, 20_000);
+    assert.equal(result.matchConfidence, "low");
+  } finally {
+    console.error = originalConsoleError;
+  }
 });
 
 test("fetchJustWatchAvailability treats blocked JustWatch pages as unknown instead of unavailable", async () => {

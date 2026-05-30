@@ -13,6 +13,14 @@ export async function POST(request: Request, context: { params: Promise<{ movieI
     }
 
     const result = await withTimeout(fetchJustWatchAvailability(movieId, body.title, body.year), AVAILABILITY_ROUTE_TIMEOUT_MS);
+    if (result.failureReason === "rate_limited") {
+      const retryAfterSeconds = Math.max(1, Math.ceil((result.retryAfterMs ?? 20_000) / 1_000));
+      return NextResponse.json(result, {
+        status: 429,
+        headers: { "Retry-After": String(retryAfterSeconds) },
+      });
+    }
+
     return NextResponse.json(result);
   } catch (error) {
     return NextResponse.json(

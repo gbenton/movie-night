@@ -8,6 +8,7 @@ const JUSTWATCH_SEARCH_URL = "https://www.justwatch.com/us/search";
 const JUSTWATCH_REQUEST_TIMEOUT_MS = 5_000;
 const JUSTWATCH_FETCH_ATTEMPTS = 2;
 const JUSTWATCH_RETRY_DELAY_MS = 250;
+const JUSTWATCH_RATE_LIMIT_RETRY_AFTER_MS = 20_000;
 const RETRYABLE_STATUS_CODES = new Set([403, 408, 425, 429, 500, 502, 503, 504]);
 
 const STREAMING_BUSINESS_FUNCTIONS = new Set([
@@ -40,7 +41,7 @@ export async function fetchJustWatchAvailability(movieId: string, title: string,
     };
   } catch (error) {
     console.error("JustWatch lookup failed", { movieId, title, year, error });
-    return buildFallbackAvailability(movieId, title, year, "unknown");
+    return buildFallbackAvailability(movieId, title, year, "unknown", classifyLookupFailure(error));
   }
 }
 
@@ -56,7 +57,7 @@ async function fetchBestJustWatchPage(
     const response = await fetchJustWatchHtml(url);
 
     if (RETRYABLE_STATUS_CODES.has(response.status)) {
-      throw new Error(`JustWatch returned ${response.status} for ${url}`);
+      throw buildRetryableStatusError(response, url);
     }
 
     if (!response.ok) {
@@ -168,13 +169,25 @@ async function fetchJustWatchHtmlAttempt(url: string, attempt: number): Promise<
       signal: AbortSignal.timeout(JUSTWATCH_REQUEST_TIMEOUT_MS),
     });
 
-    if (attempt < JUSTWATCH_FETCH_ATTEMPTS && RETRYABLE_STATUS_CODES.has(response.status)) {
+    if (response.status === 429) {
+      throw buildRetryableStatusError(response, url);
+    }
+
+    if (RETRYABLE_STATUS_CODES.has(response.status)) {
+      if (attempt >= JUSTWATCH_FETCH_ATTEMPTS) {
+        throw buildRetryableStatusError(response, url);
+      }
+
       await delay(JUSTWATCH_RETRY_DELAY_MS * attempt);
       return fetchJustWatchHtmlAttempt(url, attempt + 1);
     }
 
     return response;
   } catch (error) {
+    if (error instanceof JustWatchRateLimitError) {
+      throw error;
+    }
+
     if (attempt < JUSTWATCH_FETCH_ATTEMPTS) {
       await delay(JUSTWATCH_RETRY_DELAY_MS * attempt);
       return fetchJustWatchHtmlAttempt(url, attempt + 1);
@@ -372,6 +385,7 @@ function buildFallbackAvailability(
   title: string,
   year: number | undefined,
   status: "unavailable" | "unknown",
+  failure?: Pick<AvailabilityResult, "failureReason" | "retryAfterMs">,
 ): AvailabilityResult {
   return {
     movieId,
@@ -382,6 +396,7 @@ function buildFallbackAvailability(
     status,
     matchConfidence: "low",
     justWatchUrl: buildFallbackJustWatchUrl(title),
+    ...failure,
   };
 }
 
@@ -401,4 +416,51 @@ function decodeHtmlEntities(value: string): string {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+class JustWatchRateLimitError extends Error {
+  readonly retryAfterMs: number;
+
+  constructor(retryAfterMs: number) {
+    super("JustWatch returned 429");
+    this.name = "JustWatchRateLimitError";
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+function buildRetryableStatusError(response: Response, url: string): Error {
+  if (response.status === 429) {
+    return new JustWatchRateLimitError(parseRetryAfterMs(response.headers.get("Retry-After")));
+  }
+
+  return new Error(`JustWatch returned ${response.status} for ${url}`);
+}
+
+function parseRetryAfterMs(value: string | null): number {
+  if (!value) {
+    return JUSTWATCH_RATE_LIMIT_RETRY_AFTER_MS;
+  }
+
+  const retryAfterSeconds = Number.parseInt(value, 10);
+  if (Number.isFinite(retryAfterSeconds)) {
+    return Math.max(JUSTWATCH_RATE_LIMIT_RETRY_AFTER_MS, retryAfterSeconds * 1_000);
+  }
+
+  const retryAt = Date.parse(value);
+  if (!Number.isNaN(retryAt)) {
+    return Math.max(JUSTWATCH_RATE_LIMIT_RETRY_AFTER_MS, retryAt - Date.now());
+  }
+
+  return JUSTWATCH_RATE_LIMIT_RETRY_AFTER_MS;
+}
+
+function classifyLookupFailure(error: unknown): Pick<AvailabilityResult, "failureReason" | "retryAfterMs"> {
+  if (error instanceof JustWatchRateLimitError) {
+    return {
+      failureReason: "rate_limited",
+      retryAfterMs: error.retryAfterMs,
+    };
+  }
+
+  return { failureReason: "lookup_failed" };
 }

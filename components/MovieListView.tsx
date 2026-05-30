@@ -9,6 +9,9 @@ interface MovieListViewProps {
   showAll: boolean;
   onToggleShowAll: (nextValue: boolean) => void;
   loadingCount: number;
+  retryCount: number;
+  retryAttempt: number;
+  retryAttemptLimit: number;
 }
 
 export function MovieListView({
@@ -18,7 +21,18 @@ export function MovieListView({
   showAll,
   onToggleShowAll,
   loadingCount,
+  retryCount,
+  retryAttempt,
+  retryAttemptLimit,
 }: MovieListViewProps) {
+  const availabilityStatus = getAvailabilityStatus(
+    list?.movies.length ?? 0,
+    loadingCount,
+    retryCount,
+    retryAttempt,
+    retryAttemptLimit,
+  );
+
   return (
     <section className="panel list-panel">
       <div className="section-heading list-heading">
@@ -30,7 +44,7 @@ export function MovieListView({
           <ShowAllToggle checked={showAll} onChange={onToggleShowAll} />
         </div>
       </div>
-      {loadingCount > 0 ? <p className="helper-text">Checking availability for {loadingCount} title(s)…</p> : null}
+      {availabilityStatus ? <p className="helper-text">{availabilityStatus}</p> : null}
       {!list ? (
         <div className="empty-state">
           <h3>No lists yet</h3>
@@ -54,4 +68,34 @@ export function MovieListView({
       )}
     </section>
   );
+}
+
+function getAvailabilityStatus(
+  movieCount: number,
+  loadingCount: number,
+  retryCount: number,
+  retryAttempt: number,
+  retryAttemptLimit: number,
+): string | undefined {
+  if (loadingCount > 0) {
+    if (retryCount > 0) {
+      return `Checking availability for ${loadingCount} title(s). Waiting to retry ${retryCount} limited or uncertain title(s)...`;
+    }
+
+    return `Checking availability for ${loadingCount} title(s)...`;
+  }
+
+  if (retryCount > 0) {
+    if (retryAttempt > 1) {
+      return `First pass complete. Retry pass ${retryAttempt - 1} of ${retryAttemptLimit - 1} for ${retryCount} limited or uncertain title(s)...`;
+    }
+
+    return `First pass complete. Retrying ${retryCount} limited or uncertain title(s) in the background...`;
+  }
+
+  if (movieCount > 0) {
+    return "Availability complete.";
+  }
+
+  return undefined;
 }
