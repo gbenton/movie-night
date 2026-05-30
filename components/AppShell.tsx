@@ -8,6 +8,7 @@ import { ServiceSelector } from "./ServiceSelector";
 import { isAvailabilityFresh } from "../lib/availability/cache";
 import { filterMovies } from "../lib/filterMovies";
 import { createMovieId } from "../lib/normalize";
+import { createTimeoutSignal } from "../lib/timeoutSignal";
 import {
   getAvailabilityCache,
   getLastUsedListId,
@@ -24,6 +25,8 @@ import type { AvailabilityResult, MovieItem, MovieList, StreamingService } from 
 const AVAILABILITY_LOOKUP_CONCURRENCY = 2;
 const AVAILABILITY_LOOKUP_SPACING_MS = 200;
 const AVAILABILITY_CLIENT_TIMEOUT_MS = 12_000;
+const AVAILABILITY_LOOKUP_ATTEMPTS = 3;
+const AVAILABILITY_LOOKUP_RETRY_DELAY_MS = 750;
 
 export function AppShell() {
   const [selectedServices, setSelectedServicesState] = useState<StreamingService[]>([]);
@@ -104,38 +107,17 @@ export function AppShell() {
       async function lookupMovie(movie: MovieItem) {
         const key = createMovieId(movie.title, movie.year);
         inFlightAvailabilityKeysRef.current.add(key);
-        let update: AvailabilityResult;
 
         try {
-          const response = await fetch(`/api/availability/${encodeURIComponent(movie.id)}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ title: movie.title, year: movie.year }),
-            signal: AbortSignal.timeout(AVAILABILITY_CLIENT_TIMEOUT_MS),
-          });
-
-          if (!response.ok) {
-            throw new Error(`Lookup failed for ${movie.title}`);
-          }
-
-          update = (await response.json()) as AvailabilityResult;
+          const update = await fetchAvailabilityWithRetry(movie);
+          setAvailabilityCacheState((current) => ({ ...current, [key]: update }));
         } catch {
-          update = {
-            movieId: movie.id,
-            title: movie.title,
-            year: movie.year,
-            services: [],
-            lastCheckedAt: new Date().toISOString(),
-            status: "unknown",
-            matchConfidence: "low",
-          };
+          setAvailabilityCacheState((current) => ({
+            ...current,
+            [key]: buildUnknownAvailability(movie),
+          }));
         } finally {
           inFlightAvailabilityKeysRef.current.delete(key);
-
-          setAvailabilityCacheState((current) => {
-            const next = { ...current, [key]: update };
-            return next;
-          });
 
           if (!cancelled && lookupRunIdRef.current === runId) {
             setLoadingCount((current) => Math.max(current - 1, 0));
@@ -260,4 +242,50 @@ export function AppShell() {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchAvailabilityWithRetry(movie: MovieItem): Promise<AvailabilityResult> {
+  let fallback = buildUnknownAvailability(movie);
+
+  for (let attempt = 1; attempt <= AVAILABILITY_LOOKUP_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetch(`/api/availability/${encodeURIComponent(movie.id)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: movie.title, year: movie.year }),
+        signal: createTimeoutSignal(AVAILABILITY_CLIENT_TIMEOUT_MS),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Lookup failed for ${movie.title}`);
+      }
+
+      const result = (await response.json()) as AvailabilityResult;
+      fallback = result;
+
+      if (isAvailabilityFresh(result)) {
+        return result;
+      }
+    } catch {
+      fallback = buildUnknownAvailability(movie);
+    }
+
+    if (attempt < AVAILABILITY_LOOKUP_ATTEMPTS) {
+      await delay(AVAILABILITY_LOOKUP_RETRY_DELAY_MS * attempt);
+    }
+  }
+
+  return fallback;
+}
+
+function buildUnknownAvailability(movie: MovieItem): AvailabilityResult {
+  return {
+    movieId: movie.id,
+    title: movie.title,
+    year: movie.year,
+    services: [],
+    lastCheckedAt: new Date().toISOString(),
+    status: "unknown",
+    matchConfidence: "low",
+  };
 }
