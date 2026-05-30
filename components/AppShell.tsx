@@ -22,11 +22,17 @@ import {
 } from "../lib/storage";
 import type { AvailabilityResult, MovieItem, MovieList, StreamingService } from "../lib/types";
 
-const AVAILABILITY_LOOKUP_CONCURRENCY = 2;
-const AVAILABILITY_LOOKUP_SPACING_MS = 200;
-const AVAILABILITY_CLIENT_TIMEOUT_MS = 12_000;
-const AVAILABILITY_LOOKUP_ATTEMPTS = 3;
-const AVAILABILITY_LOOKUP_RETRY_DELAY_MS = 750;
+const AVAILABILITY_LOOKUP_SPACING_MS = 1_500;
+const AVAILABILITY_CLIENT_TIMEOUT_MS = 20_000;
+const AVAILABILITY_LOOKUP_MAX_ATTEMPTS = 5;
+const AVAILABILITY_UNTRUSTED_RETRY_DELAY_MS = 8_000;
+const AVAILABILITY_UNTRUSTED_STREAK_COOLDOWN_MS = 30_000;
+const AVAILABILITY_CACHE_WRITE_DEBOUNCE_MS = 2_000;
+
+interface LookupQueueItem {
+  movie: MovieItem;
+  attempt: number;
+}
 
 export function AppShell() {
   const [selectedServices, setSelectedServicesState] = useState<StreamingService[]>([]);
@@ -39,6 +45,7 @@ export function AppShell() {
   const inFlightAvailabilityKeysRef = useRef(new Set<string>());
   const skipNextAvailabilityCacheWriteRef = useRef(true);
   const availabilityCacheRef = useRef<Record<string, AvailabilityResult>>({});
+  const availabilityCacheWriteTimeoutRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     setSelectedServicesState(getSelectedServices());
@@ -99,53 +106,75 @@ export function AppShell() {
     }
 
     let cancelled = false;
-    setLoadingCount(staleMovies.length);
+    const pendingKeys = new Set(staleMovies.map((movie) => createMovieId(movie.title, movie.year)));
+    setLoadingCount(pendingKeys.size);
 
     (async () => {
-      let nextMovieIndex = 0;
+      const queue: LookupQueueItem[] = staleMovies.map((movie) => ({ movie, attempt: 1 }));
+      let untrustedResultStreak = 0;
 
-      async function lookupMovie(movie: MovieItem) {
+      async function lookupMovie({ movie, attempt }: LookupQueueItem) {
         const key = createMovieId(movie.title, movie.year);
         inFlightAvailabilityKeysRef.current.add(key);
 
         try {
-          const update = await fetchAvailabilityWithRetry(movie);
-          setAvailabilityCacheState((current) => ({ ...current, [key]: update }));
+          await waitForDocumentVisible(() => cancelled || lookupRunIdRef.current !== runId);
+          if (cancelled || lookupRunIdRef.current !== runId) {
+            return;
+          }
+
+          const update = await fetchAvailability(movie);
+          const trusted = isAvailabilityFresh(update);
+          const exhausted = attempt >= AVAILABILITY_LOOKUP_MAX_ATTEMPTS;
+
+          if (trusted || exhausted) {
+            setAvailabilityCacheState((current) => ({ ...current, [key]: update }));
+            pendingKeys.delete(key);
+          } else {
+            queue.push({ movie, attempt: attempt + 1 });
+          }
+
+          untrustedResultStreak = trusted ? 0 : untrustedResultStreak + 1;
         } catch {
-          setAvailabilityCacheState((current) => ({
-            ...current,
-            [key]: buildUnknownAvailability(movie),
-          }));
+          const exhausted = attempt >= AVAILABILITY_LOOKUP_MAX_ATTEMPTS;
+          if (exhausted) {
+            setAvailabilityCacheState((current) => ({
+              ...current,
+              [key]: buildUnknownAvailability(movie),
+            }));
+            pendingKeys.delete(key);
+          } else {
+            queue.push({ movie, attempt: attempt + 1 });
+          }
+
+          untrustedResultStreak += 1;
         } finally {
           inFlightAvailabilityKeysRef.current.delete(key);
 
           if (!cancelled && lookupRunIdRef.current === runId) {
-            setLoadingCount((current) => Math.max(current - 1, 0));
+            setLoadingCount(pendingKeys.size);
           }
         }
       }
 
-      async function lookupNextMovie() {
-        while (!cancelled) {
-          const movie = staleMovies[nextMovieIndex];
-          nextMovieIndex += 1;
+      while (!cancelled && lookupRunIdRef.current === runId) {
+        const item = queue.shift();
+        if (!item) {
+          break;
+        }
 
-          if (!movie) {
-            return;
-          }
+        await lookupMovie(item);
 
-          await lookupMovie(movie);
-          await delay(AVAILABILITY_LOOKUP_SPACING_MS);
+        if (queue.length > 0 && !cancelled && lookupRunIdRef.current === runId) {
+          await delay(getLookupDelayMs(item.attempt, untrustedResultStreak));
         }
       }
-
-      await Promise.all(
-        Array.from({ length: Math.min(AVAILABILITY_LOOKUP_CONCURRENCY, staleMovies.length) }, () => lookupNextMovie()),
-      );
 
       if (cancelled) {
         return;
       }
+
+      setLoadingCount(0);
     })();
 
     return () => {
@@ -159,8 +188,47 @@ export function AppShell() {
       return;
     }
 
-    setAvailabilityCache(availabilityCache);
+    if (availabilityCacheWriteTimeoutRef.current) {
+      window.clearTimeout(availabilityCacheWriteTimeoutRef.current);
+    }
+
+    availabilityCacheWriteTimeoutRef.current = window.setTimeout(() => {
+      setAvailabilityCache(availabilityCacheRef.current);
+      availabilityCacheWriteTimeoutRef.current = undefined;
+    }, AVAILABILITY_CACHE_WRITE_DEBOUNCE_MS);
+
+    return () => {
+      if (availabilityCacheWriteTimeoutRef.current) {
+        window.clearTimeout(availabilityCacheWriteTimeoutRef.current);
+        availabilityCacheWriteTimeoutRef.current = undefined;
+      }
+    };
   }, [availabilityCache]);
+
+  useEffect(() => {
+    function flushAvailabilityCache() {
+      if (availabilityCacheWriteTimeoutRef.current) {
+        window.clearTimeout(availabilityCacheWriteTimeoutRef.current);
+        availabilityCacheWriteTimeoutRef.current = undefined;
+      }
+
+      setAvailabilityCache(availabilityCacheRef.current);
+    }
+
+    function flushWhenHidden() {
+      if (document.visibilityState === "hidden") {
+        flushAvailabilityCache();
+      }
+    }
+
+    window.addEventListener("pagehide", flushAvailabilityCache);
+    document.addEventListener("visibilitychange", flushWhenHidden);
+
+    return () => {
+      window.removeEventListener("pagehide", flushAvailabilityCache);
+      document.removeEventListener("visibilitychange", flushWhenHidden);
+    };
+  }, []);
 
   const visibleMovies = useMemo(
     () => filterMovies({ list: activeList, selectedServices, availabilityByMovieKey: availabilityCache, showAll }),
@@ -244,38 +312,51 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function fetchAvailabilityWithRetry(movie: MovieItem): Promise<AvailabilityResult> {
-  let fallback = buildUnknownAvailability(movie);
+async function fetchAvailability(movie: MovieItem): Promise<AvailabilityResult> {
+  const response = await fetch(`/api/availability/${encodeURIComponent(movie.id)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title: movie.title, year: movie.year }),
+    signal: createTimeoutSignal(AVAILABILITY_CLIENT_TIMEOUT_MS),
+  });
 
-  for (let attempt = 1; attempt <= AVAILABILITY_LOOKUP_ATTEMPTS; attempt += 1) {
-    try {
-      const response = await fetch(`/api/availability/${encodeURIComponent(movie.id)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: movie.title, year: movie.year }),
-        signal: createTimeoutSignal(AVAILABILITY_CLIENT_TIMEOUT_MS),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Lookup failed for ${movie.title}`);
-      }
-
-      const result = (await response.json()) as AvailabilityResult;
-      fallback = result;
-
-      if (isAvailabilityFresh(result)) {
-        return result;
-      }
-    } catch {
-      fallback = buildUnknownAvailability(movie);
-    }
-
-    if (attempt < AVAILABILITY_LOOKUP_ATTEMPTS) {
-      await delay(AVAILABILITY_LOOKUP_RETRY_DELAY_MS * attempt);
-    }
+  if (!response.ok) {
+    throw new Error(`Lookup failed for ${movie.title}`);
   }
 
-  return fallback;
+  return (await response.json()) as AvailabilityResult;
+}
+
+function getLookupDelayMs(attempt: number, untrustedResultStreak: number): number {
+  if (untrustedResultStreak >= 3) {
+    return AVAILABILITY_UNTRUSTED_STREAK_COOLDOWN_MS;
+  }
+
+  if (untrustedResultStreak > 0) {
+    return AVAILABILITY_UNTRUSTED_RETRY_DELAY_MS * attempt;
+  }
+
+  return AVAILABILITY_LOOKUP_SPACING_MS;
+}
+
+function waitForDocumentVisible(shouldCancel: () => boolean): Promise<void> {
+  if (typeof document === "undefined" || document.visibilityState !== "hidden" || shouldCancel()) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    const interval = window.setInterval(handleVisibilityChange, 1_000);
+
+    function handleVisibilityChange() {
+      if (document.visibilityState !== "hidden" || shouldCancel()) {
+        window.clearInterval(interval);
+        document.removeEventListener("visibilitychange", handleVisibilityChange);
+        resolve();
+      }
+    }
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+  });
 }
 
 function buildUnknownAvailability(movie: MovieItem): AvailabilityResult {
