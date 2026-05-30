@@ -1,14 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useReducer, useRef } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import { ImportPanel } from "./ImportPanel";
 import { ListPicker } from "./ListPicker";
 import { MovieListView } from "./MovieListView";
 import { ServiceSelector } from "./ServiceSelector";
-import { isAvailabilityFresh } from "../lib/availability/cache";
+import { AVAILABILITY_LOOKUP_MAX_ATTEMPTS, useAvailabilityLookupQueue } from "./useAvailabilityLookupQueue";
 import { filterMovies } from "../lib/filterMovies";
-import { createMovieId } from "../lib/normalize";
-import { createTimeoutSignal } from "../lib/timeoutSignal";
 import {
   getAvailabilityCache,
   getLastUsedListId,
@@ -20,19 +18,9 @@ import {
   setLists,
   setSelectedServices,
 } from "../lib/storage";
-import type { AvailabilityResult, MovieItem, MovieList, StreamingService } from "../lib/types";
+import type { AvailabilityResult, MovieList, StreamingService } from "../lib/types";
 
-const AVAILABILITY_LOOKUP_SPACING_MS = 1_000;
-const AVAILABILITY_CLIENT_TIMEOUT_MS = 20_000;
-const AVAILABILITY_LOOKUP_MAX_ATTEMPTS = 5;
-const AVAILABILITY_UNTRUSTED_RETRY_DELAY_MS = 8_000;
-const AVAILABILITY_UNTRUSTED_STREAK_COOLDOWN_MS = 30_000;
 const AVAILABILITY_CACHE_WRITE_DEBOUNCE_MS = 2_000;
-
-interface LookupQueueItem {
-  movie: MovieItem;
-  attempt: number;
-}
 
 interface AppShellState {
   selectedServices: StreamingService[];
@@ -42,6 +30,7 @@ interface AppShellState {
   showAll: boolean;
   loadingCount: number;
   retryCount: number;
+  retryAttempt: number;
 }
 
 type AppShellAction =
@@ -52,19 +41,14 @@ type AppShellAction =
   | { type: "setShowAll"; showAll: boolean }
   | { type: "setLoadingCount"; loadingCount: number }
   | { type: "setRetryCount"; retryCount: number }
+  | { type: "setRetryAttempt"; retryAttempt: number }
   | { type: "setAvailability"; movieKey: string; availability: AvailabilityResult };
 
 export function AppShell() {
   const [state, dispatch] = useReducer(appShellReducer, undefined, createInitialAppShellState);
-  const lookupRunIdRef = useRef(0);
-  const inFlightAvailabilityKeysRef = useRef<Set<string> | null>(null);
   const skipNextAvailabilityCacheWriteRef = useRef(true);
   const availabilityCacheRef = useRef<Record<string, AvailabilityResult>>({});
   const availabilityCacheWriteTimeoutRef = useRef<number | undefined>(undefined);
-
-  if (inFlightAvailabilityKeysRef.current === null) {
-    inFlightAvailabilityKeysRef.current = new Set<string>();
-  }
 
   useEffect(() => {
     availabilityCacheRef.current = state.availabilityCache;
@@ -75,136 +59,27 @@ export function AppShell() {
     [state.lists, state.lastUsedListId],
   );
 
-  useEffect(() => {
-    if (!activeList) {
-      lookupRunIdRef.current += 1;
-      dispatch({ type: "setLoadingCount", loadingCount: 0 });
-      dispatch({ type: "setRetryCount", retryCount: 0 });
-      return;
-    }
+  const handleAvailability = useCallback((movieKey: string, availability: AvailabilityResult) => {
+    dispatch({ type: "setAvailability", movieKey, availability });
+  }, []);
+  const handleLoadingCountChange = useCallback((loadingCount: number) => {
+    dispatch({ type: "setLoadingCount", loadingCount });
+  }, []);
+  const handleRetryAttemptChange = useCallback((retryAttempt: number) => {
+    dispatch({ type: "setRetryAttempt", retryAttempt });
+  }, []);
+  const handleRetryCountChange = useCallback((retryCount: number) => {
+    dispatch({ type: "setRetryCount", retryCount });
+  }, []);
 
-    const runId = lookupRunIdRef.current + 1;
-    lookupRunIdRef.current = runId;
-
-    const currentAvailabilityCache = availabilityCacheRef.current;
-    const staleMovieByKey = new Map<string, MovieItem>();
-    for (const movie of activeList.movies) {
-      const key = createMovieId(movie.title, movie.year);
-      const availability = currentAvailabilityCache[key];
-      if (
-        !inFlightAvailabilityKeysRef.current?.has(key) &&
-        !isAvailabilityFresh(availability)
-      ) {
-        staleMovieByKey.set(key, movie);
-      }
-    }
-
-    const staleMovies = Array.from(staleMovieByKey.values());
-    if (staleMovies.length === 0) {
-      dispatch({ type: "setLoadingCount", loadingCount: 0 });
-      dispatch({ type: "setRetryCount", retryCount: 0 });
-      return;
-    }
-
-    let cancelled = false;
-    const foregroundPendingKeys = new Set(staleMovies.map((movie) => createMovieId(movie.title, movie.year)));
-    const retryPendingKeys = new Set<string>();
-    dispatch({ type: "setLoadingCount", loadingCount: foregroundPendingKeys.size });
-    dispatch({ type: "setRetryCount", retryCount: 0 });
-
-    (async () => {
-      const queue: LookupQueueItem[] = staleMovies.map((movie) => ({ movie, attempt: 1 }));
-      let untrustedResultStreak = 0;
-
-      async function lookupMovie({ movie, attempt }: LookupQueueItem) {
-        const key = createMovieId(movie.title, movie.year);
-        inFlightAvailabilityKeysRef.current?.add(key);
-
-        try {
-          await waitForDocumentVisible(() => cancelled || lookupRunIdRef.current !== runId);
-          if (cancelled || lookupRunIdRef.current !== runId) {
-            return;
-          }
-
-          const update = await fetchAvailability(movie);
-          const trusted = isAvailabilityFresh(update);
-          const exhausted = attempt >= AVAILABILITY_LOOKUP_MAX_ATTEMPTS;
-          dispatch({ type: "setAvailability", movieKey: key, availability: update });
-          markForegroundLookupFinished(key);
-
-          if (!trusted && !exhausted) {
-            retryPendingKeys.add(key);
-            queue.push({ movie, attempt: attempt + 1 });
-          } else {
-            retryPendingKeys.delete(key);
-          }
-
-          untrustedResultStreak = trusted ? 0 : untrustedResultStreak + 1;
-        } catch {
-          const exhausted = attempt >= AVAILABILITY_LOOKUP_MAX_ATTEMPTS;
-          markForegroundLookupFinished(key);
-
-          if (attempt === 1 || exhausted) {
-            dispatch({ type: "setAvailability", movieKey: key, availability: buildUnknownAvailability(movie) });
-          }
-
-          if (!exhausted) {
-            retryPendingKeys.add(key);
-            queue.push({ movie, attempt: attempt + 1 });
-          } else {
-            retryPendingKeys.delete(key);
-          }
-
-          untrustedResultStreak += 1;
-        } finally {
-          inFlightAvailabilityKeysRef.current?.delete(key);
-
-          if (!cancelled && lookupRunIdRef.current === runId) {
-            dispatch({ type: "setLoadingCount", loadingCount: foregroundPendingKeys.size });
-            dispatch({ type: "setRetryCount", retryCount: retryPendingKeys.size });
-          }
-        }
-      }
-
-      function markForegroundLookupFinished(key: string) {
-        if (foregroundPendingKeys.has(key)) {
-          foregroundPendingKeys.delete(key);
-        }
-      }
-
-      async function processNextQueuedMovie(): Promise<void> {
-        if (cancelled || lookupRunIdRef.current !== runId) {
-          return;
-        }
-
-        const item = queue.shift();
-        if (!item) {
-          return;
-        }
-
-        await lookupMovie(item);
-
-        if (queue.length > 0 && !cancelled && lookupRunIdRef.current === runId) {
-          await delay(getLookupDelayMs(item.attempt, untrustedResultStreak));
-        }
-
-        return processNextQueuedMovie();
-      }
-
-      await processNextQueuedMovie();
-
-      if (cancelled) {
-        return;
-      }
-
-      dispatch({ type: "setLoadingCount", loadingCount: 0 });
-      dispatch({ type: "setRetryCount", retryCount: 0 });
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [activeList]);
+  useAvailabilityLookupQueue({
+    activeList,
+    availabilityCache: state.availabilityCache,
+    onAvailability: handleAvailability,
+    onLoadingCountChange: handleLoadingCountChange,
+    onRetryAttemptChange: handleRetryAttemptChange,
+    onRetryCountChange: handleRetryCountChange,
+  });
 
   useEffect(() => {
     if (skipNextAvailabilityCacheWriteRef.current) {
@@ -328,6 +203,8 @@ export function AppShell() {
           onToggleShowAll={(showAll) => dispatch({ type: "setShowAll", showAll })}
           loadingCount={state.loadingCount}
           retryCount={state.retryCount}
+          retryAttempt={state.retryAttempt}
+          retryAttemptLimit={AVAILABILITY_LOOKUP_MAX_ATTEMPTS}
         />
       </div>
     </main>
@@ -343,6 +220,7 @@ function createInitialAppShellState(): AppShellState {
     showAll: false,
     loadingCount: 0,
     retryCount: 0,
+    retryAttempt: 0,
   };
 }
 
@@ -392,6 +270,10 @@ function appShellReducer(state: AppShellState, action: AppShellAction): AppShell
       return state.retryCount === action.retryCount
         ? state
         : { ...state, retryCount: action.retryCount };
+    case "setRetryAttempt":
+      return state.retryAttempt === action.retryAttempt
+        ? state
+        : { ...state, retryAttempt: action.retryAttempt };
     case "setAvailability":
       return {
         ...state,
@@ -403,71 +285,4 @@ function appShellReducer(state: AppShellState, action: AppShellAction): AppShell
     default:
       return state;
   }
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function fetchAvailability(movie: MovieItem): Promise<AvailabilityResult> {
-  const response = await fetch(`/api/availability/${encodeURIComponent(movie.id)}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title: movie.title, year: movie.year }),
-    signal: createTimeoutSignal(AVAILABILITY_CLIENT_TIMEOUT_MS),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Lookup failed for ${movie.title}`);
-  }
-
-  return (await response.json()) as AvailabilityResult;
-}
-
-function getLookupDelayMs(attempt: number, untrustedResultStreak: number): number {
-  if (attempt === 1) {
-    return AVAILABILITY_LOOKUP_SPACING_MS;
-  }
-
-  if (untrustedResultStreak >= 3) {
-    return AVAILABILITY_UNTRUSTED_STREAK_COOLDOWN_MS;
-  }
-
-  if (untrustedResultStreak > 0) {
-    return AVAILABILITY_UNTRUSTED_RETRY_DELAY_MS * (attempt - 1);
-  }
-
-  return AVAILABILITY_LOOKUP_SPACING_MS;
-}
-
-function waitForDocumentVisible(shouldCancel: () => boolean): Promise<void> {
-  if (typeof document === "undefined" || document.visibilityState !== "hidden" || shouldCancel()) {
-    return Promise.resolve();
-  }
-
-  return new Promise((resolve) => {
-    const interval = window.setInterval(handleVisibilityChange, 1_000);
-
-    function handleVisibilityChange() {
-      if (document.visibilityState !== "hidden" || shouldCancel()) {
-        window.clearInterval(interval);
-        document.removeEventListener("visibilitychange", handleVisibilityChange);
-        resolve();
-      }
-    }
-
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-  });
-}
-
-function buildUnknownAvailability(movie: MovieItem): AvailabilityResult {
-  return {
-    movieId: movie.id,
-    title: movie.title,
-    year: movie.year,
-    services: [],
-    lastCheckedAt: new Date().toISOString(),
-    status: "unknown",
-    matchConfidence: "low",
-  };
 }

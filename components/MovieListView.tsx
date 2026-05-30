@@ -10,6 +10,8 @@ interface MovieListViewProps {
   onToggleShowAll: (nextValue: boolean) => void;
   loadingCount: number;
   retryCount: number;
+  retryAttempt: number;
+  retryAttemptLimit: number;
 }
 
 export function MovieListView({
@@ -20,8 +22,16 @@ export function MovieListView({
   onToggleShowAll,
   loadingCount,
   retryCount,
+  retryAttempt,
+  retryAttemptLimit,
 }: MovieListViewProps) {
-  const availabilityStatus = getAvailabilityStatus(loadingCount, retryCount);
+  const availabilityStatus = getAvailabilityStatus(
+    list?.movies.length ?? 0,
+    loadingCount,
+    retryCount,
+    retryAttempt,
+    retryAttemptLimit,
+  );
 
   return (
     <section className="panel list-panel">
@@ -60,13 +70,27 @@ export function MovieListView({
   );
 }
 
-function getAvailabilityStatus(loadingCount: number, retryCount: number): string | undefined {
+function getAvailabilityStatus(
+  movieCount: number,
+  loadingCount: number,
+  retryCount: number,
+  retryAttempt: number,
+  retryAttemptLimit: number,
+): string | undefined {
   if (loadingCount > 0) {
     return `Checking availability for ${loadingCount} title(s)...`;
   }
 
   if (retryCount > 0) {
+    if (retryAttempt > 1) {
+      return `First pass complete. Retry pass ${retryAttempt - 1} of ${retryAttemptLimit - 1} for ${retryCount} uncertain title(s)...`;
+    }
+
     return `First pass complete. Retrying ${retryCount} uncertain title(s) in the background...`;
+  }
+
+  if (movieCount > 0) {
+    return "Availability complete.";
   }
 
   return undefined;
