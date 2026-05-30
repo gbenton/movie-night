@@ -22,7 +22,7 @@ import {
 } from "../lib/storage";
 import type { AvailabilityResult, MovieItem, MovieList, StreamingService } from "../lib/types";
 
-const AVAILABILITY_LOOKUP_SPACING_MS = 1_500;
+const AVAILABILITY_LOOKUP_SPACING_MS = 1_000;
 const AVAILABILITY_CLIENT_TIMEOUT_MS = 20_000;
 const AVAILABILITY_LOOKUP_MAX_ATTEMPTS = 5;
 const AVAILABILITY_UNTRUSTED_RETRY_DELAY_MS = 8_000;
@@ -103,8 +103,8 @@ export function AppShell() {
     }
 
     let cancelled = false;
-    const pendingKeys = new Set(staleMovies.map((movie) => createMovieId(movie.title, movie.year)));
-    dispatch({ type: "setLoadingCount", loadingCount: pendingKeys.size });
+    const foregroundPendingKeys = new Set(staleMovies.map((movie) => createMovieId(movie.title, movie.year)));
+    dispatch({ type: "setLoadingCount", loadingCount: foregroundPendingKeys.size });
 
     (async () => {
       const queue: LookupQueueItem[] = staleMovies.map((movie) => ({ movie, attempt: 1 }));
@@ -123,21 +123,23 @@ export function AppShell() {
           const update = await fetchAvailability(movie);
           const trusted = isAvailabilityFresh(update);
           const exhausted = attempt >= AVAILABILITY_LOOKUP_MAX_ATTEMPTS;
+          dispatch({ type: "setAvailability", movieKey: key, availability: update });
+          markForegroundLookupFinished(key);
 
-          if (trusted || exhausted) {
-            dispatch({ type: "setAvailability", movieKey: key, availability: update });
-            pendingKeys.delete(key);
-          } else {
+          if (!trusted && !exhausted) {
             queue.push({ movie, attempt: attempt + 1 });
           }
 
           untrustedResultStreak = trusted ? 0 : untrustedResultStreak + 1;
         } catch {
           const exhausted = attempt >= AVAILABILITY_LOOKUP_MAX_ATTEMPTS;
-          if (exhausted) {
+          markForegroundLookupFinished(key);
+
+          if (attempt === 1 || exhausted) {
             dispatch({ type: "setAvailability", movieKey: key, availability: buildUnknownAvailability(movie) });
-            pendingKeys.delete(key);
-          } else {
+          }
+
+          if (!exhausted) {
             queue.push({ movie, attempt: attempt + 1 });
           }
 
@@ -146,8 +148,14 @@ export function AppShell() {
           inFlightAvailabilityKeysRef.current?.delete(key);
 
           if (!cancelled && lookupRunIdRef.current === runId) {
-            dispatch({ type: "setLoadingCount", loadingCount: pendingKeys.size });
+            dispatch({ type: "setLoadingCount", loadingCount: foregroundPendingKeys.size });
           }
+        }
+      }
+
+      function markForegroundLookupFinished(key: string) {
+        if (foregroundPendingKeys.has(key)) {
+          foregroundPendingKeys.delete(key);
         }
       }
 
@@ -397,12 +405,16 @@ async function fetchAvailability(movie: MovieItem): Promise<AvailabilityResult> 
 }
 
 function getLookupDelayMs(attempt: number, untrustedResultStreak: number): number {
+  if (attempt === 1) {
+    return AVAILABILITY_LOOKUP_SPACING_MS;
+  }
+
   if (untrustedResultStreak >= 3) {
     return AVAILABILITY_UNTRUSTED_STREAK_COOLDOWN_MS;
   }
 
   if (untrustedResultStreak > 0) {
-    return AVAILABILITY_UNTRUSTED_RETRY_DELAY_MS * attempt;
+    return AVAILABILITY_UNTRUSTED_RETRY_DELAY_MS * (attempt - 1);
   }
 
   return AVAILABILITY_LOOKUP_SPACING_MS;
