@@ -6,10 +6,10 @@ import { createMovieId } from "../lib/normalize";
 import { createTimeoutSignal } from "../lib/timeoutSignal";
 import type { AvailabilityResult, MovieItem, MovieList } from "../lib/types";
 
-const AVAILABILITY_FIRST_PASS_CONCURRENCY = 5;
-const AVAILABILITY_FIRST_PASS_START_SPACING_MS = 150;
-const AVAILABILITY_RETRY_CONCURRENCY = 2;
-const AVAILABILITY_RETRY_START_SPACING_MS = 750;
+const AVAILABILITY_FIRST_PASS_CONCURRENCY = 2;
+const AVAILABILITY_FIRST_PASS_START_SPACING_MS = 1_250;
+const AVAILABILITY_RETRY_CONCURRENCY = 1;
+const AVAILABILITY_RETRY_START_SPACING_MS = 2_500;
 const AVAILABILITY_CLIENT_TIMEOUT_MS = 20_000;
 export const AVAILABILITY_LOOKUP_MAX_ATTEMPTS = 5;
 const AVAILABILITY_UNTRUSTED_RETRY_DELAY_MS = 6_000;
@@ -138,6 +138,7 @@ function runLookupQueue({
     const retryQueue: LookupQueueItem[] = [];
     const waitForFirstPassStart = createStartLimiter(AVAILABILITY_FIRST_PASS_START_SPACING_MS);
     const waitForRetryStart = createStartLimiter(AVAILABILITY_RETRY_START_SPACING_MS);
+    let rateLimitPauseUntil = 0;
     let untrustedResultStreak = 0;
 
     async function lookupMovie({ movie, attempt }: LookupQueueItem) {
@@ -153,7 +154,9 @@ function runLookupQueue({
         const update = await fetchAvailability(movie);
         const trusted = isAvailabilityFresh(update);
         const exhausted = attempt >= AVAILABILITY_LOOKUP_MAX_ATTEMPTS;
-        onAvailability(key, update);
+        if (trusted || exhausted) {
+          onAvailability(key, update);
+        }
         markForegroundLookupFinished(key);
 
         if (!trusted && !exhausted) {
@@ -164,11 +167,19 @@ function runLookupQueue({
         }
 
         untrustedResultStreak = trusted ? 0 : untrustedResultStreak + 1;
-      } catch {
+      } catch (error) {
+        if (error instanceof AvailabilityRateLimitError) {
+          rateLimitPauseUntil = Math.max(rateLimitPauseUntil, Date.now() + error.retryAfterMs);
+          markForegroundLookupFinished(key);
+          retryPendingKeys.add(key);
+          retryQueue.push({ movie, attempt });
+          return;
+        }
+
         const exhausted = attempt >= AVAILABILITY_LOOKUP_MAX_ATTEMPTS;
         markForegroundLookupFinished(key);
 
-        if (attempt === 1 || exhausted) {
+        if (exhausted) {
           onAvailability(key, buildUnknownAvailability(movie));
         }
 
@@ -210,6 +221,7 @@ function runLookupQueue({
         }
 
         await waitForStart(getCancelled);
+        await waitForRateLimitPause();
         if (getCancelled()) {
           return;
         }
@@ -247,6 +259,13 @@ function runLookupQueue({
         waitForRetryStart,
       );
       return processRetryQueue();
+    }
+
+    async function waitForRateLimitPause(): Promise<void> {
+      const waitMs = rateLimitPauseUntil - Date.now();
+      if (waitMs > 0) {
+        await delay(waitMs);
+      }
     }
 
     await processLookupItems(
@@ -293,11 +312,42 @@ async function fetchAvailability(movie: MovieItem): Promise<AvailabilityResult> 
     signal: createTimeoutSignal(AVAILABILITY_CLIENT_TIMEOUT_MS),
   });
 
+  if (response.status === 429) {
+    const body = (await response.json().catch(() => ({}))) as Partial<AvailabilityResult>;
+    throw new AvailabilityRateLimitError(body.retryAfterMs ?? parseRetryAfterHeader(response.headers.get("Retry-After")));
+  }
+
   if (!response.ok) {
     throw new Error(`Lookup failed for ${movie.title}`);
   }
 
   return (await response.json()) as AvailabilityResult;
+}
+
+class AvailabilityRateLimitError extends Error {
+  readonly retryAfterMs: number;
+
+  constructor(retryAfterMs: number) {
+    super("Availability provider asked us to slow down");
+    this.name = "AvailabilityRateLimitError";
+    this.retryAfterMs = Math.max(1_000, retryAfterMs);
+  }
+}
+
+function parseRetryAfterHeader(value: string | null): number {
+  if (!value) {
+    return AVAILABILITY_UNTRUSTED_STREAK_COOLDOWN_MS;
+  }
+
+  const seconds = Number.parseInt(value, 10);
+  if (Number.isFinite(seconds)) {
+    return seconds * 1_000;
+  }
+
+  const retryAt = Date.parse(value);
+  return Number.isNaN(retryAt)
+    ? AVAILABILITY_UNTRUSTED_STREAK_COOLDOWN_MS
+    : Math.max(1_000, retryAt - Date.now());
 }
 
 function getRetryDelayMs(attempt: number, untrustedResultStreak: number): number {
