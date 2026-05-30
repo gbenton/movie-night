@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useReducer, useRef } from "react";
 import { ImportPanel } from "./ImportPanel";
 import { ListPicker } from "./ListPicker";
 import { MovieListView } from "./MovieListView";
@@ -34,52 +34,49 @@ interface LookupQueueItem {
   attempt: number;
 }
 
+interface AppShellState {
+  selectedServices: StreamingService[];
+  lists: MovieList[];
+  lastUsedListId?: string;
+  availabilityCache: Record<string, AvailabilityResult>;
+  showAll: boolean;
+  loadingCount: number;
+}
+
+type AppShellAction =
+  | { type: "toggleService"; service: StreamingService }
+  | { type: "importList"; list: MovieList }
+  | { type: "selectList"; listId: string }
+  | { type: "deleteList"; listId: string; activeList?: MovieList }
+  | { type: "setShowAll"; showAll: boolean }
+  | { type: "setLoadingCount"; loadingCount: number }
+  | { type: "setAvailability"; movieKey: string; availability: AvailabilityResult };
+
 export function AppShell() {
-  const [selectedServices, setSelectedServicesState] = useState<StreamingService[]>([]);
-  const [lists, setListsState] = useState<MovieList[]>([]);
-  const [lastUsedListId, setLastUsedListIdState] = useState<string>();
-  const [availabilityCache, setAvailabilityCacheState] = useState<Record<string, AvailabilityResult>>({});
-  const [showAll, setShowAll] = useState(false);
-  const [loadingCount, setLoadingCount] = useState(0);
+  const [state, dispatch] = useReducer(appShellReducer, undefined, createInitialAppShellState);
   const lookupRunIdRef = useRef(0);
-  const inFlightAvailabilityKeysRef = useRef(new Set<string>());
+  const inFlightAvailabilityKeysRef = useRef<Set<string> | null>(null);
   const skipNextAvailabilityCacheWriteRef = useRef(true);
   const availabilityCacheRef = useRef<Record<string, AvailabilityResult>>({});
   const availabilityCacheWriteTimeoutRef = useRef<number | undefined>(undefined);
 
-  useEffect(() => {
-    setSelectedServicesState(getSelectedServices());
-    setListsState(getLists());
-    setLastUsedListIdState(getLastUsedListId());
-    setAvailabilityCacheState(getAvailabilityCache());
-  }, []);
+  if (inFlightAvailabilityKeysRef.current === null) {
+    inFlightAvailabilityKeysRef.current = new Set<string>();
+  }
 
   useEffect(() => {
-    availabilityCacheRef.current = availabilityCache;
-  }, [availabilityCache]);
+    availabilityCacheRef.current = state.availabilityCache;
+  }, [state.availabilityCache]);
 
   const activeList = useMemo(
-    () => lists.find((list) => list.id === lastUsedListId) ?? lists[0],
-    [lists, lastUsedListId],
+    () => state.lists.find((list) => list.id === state.lastUsedListId) ?? state.lists[0],
+    [state.lists, state.lastUsedListId],
   );
 
   useEffect(() => {
     if (!activeList) {
       lookupRunIdRef.current += 1;
-      setLoadingCount(0);
-      return;
-    }
-
-    if (activeList.id !== lastUsedListId) {
-      setLastUsedListIdState(activeList.id);
-      setLastUsedListId(activeList.id);
-    }
-  }, [activeList, lastUsedListId]);
-
-  useEffect(() => {
-    if (!activeList) {
-      lookupRunIdRef.current += 1;
-      setLoadingCount(0);
+      dispatch({ type: "setLoadingCount", loadingCount: 0 });
       return;
     }
 
@@ -92,7 +89,7 @@ export function AppShell() {
       const key = createMovieId(movie.title, movie.year);
       const availability = currentAvailabilityCache[key];
       if (
-        !inFlightAvailabilityKeysRef.current.has(key) &&
+        !inFlightAvailabilityKeysRef.current?.has(key) &&
         !isAvailabilityFresh(availability)
       ) {
         staleMovieByKey.set(key, movie);
@@ -101,13 +98,13 @@ export function AppShell() {
 
     const staleMovies = Array.from(staleMovieByKey.values());
     if (staleMovies.length === 0) {
-      setLoadingCount(0);
+      dispatch({ type: "setLoadingCount", loadingCount: 0 });
       return;
     }
 
     let cancelled = false;
     const pendingKeys = new Set(staleMovies.map((movie) => createMovieId(movie.title, movie.year)));
-    setLoadingCount(pendingKeys.size);
+    dispatch({ type: "setLoadingCount", loadingCount: pendingKeys.size });
 
     (async () => {
       const queue: LookupQueueItem[] = staleMovies.map((movie) => ({ movie, attempt: 1 }));
@@ -115,7 +112,7 @@ export function AppShell() {
 
       async function lookupMovie({ movie, attempt }: LookupQueueItem) {
         const key = createMovieId(movie.title, movie.year);
-        inFlightAvailabilityKeysRef.current.add(key);
+        inFlightAvailabilityKeysRef.current?.add(key);
 
         try {
           await waitForDocumentVisible(() => cancelled || lookupRunIdRef.current !== runId);
@@ -128,7 +125,7 @@ export function AppShell() {
           const exhausted = attempt >= AVAILABILITY_LOOKUP_MAX_ATTEMPTS;
 
           if (trusted || exhausted) {
-            setAvailabilityCacheState((current) => ({ ...current, [key]: update }));
+            dispatch({ type: "setAvailability", movieKey: key, availability: update });
             pendingKeys.delete(key);
           } else {
             queue.push({ movie, attempt: attempt + 1 });
@@ -138,10 +135,7 @@ export function AppShell() {
         } catch {
           const exhausted = attempt >= AVAILABILITY_LOOKUP_MAX_ATTEMPTS;
           if (exhausted) {
-            setAvailabilityCacheState((current) => ({
-              ...current,
-              [key]: buildUnknownAvailability(movie),
-            }));
+            dispatch({ type: "setAvailability", movieKey: key, availability: buildUnknownAvailability(movie) });
             pendingKeys.delete(key);
           } else {
             queue.push({ movie, attempt: attempt + 1 });
@@ -149,18 +143,22 @@ export function AppShell() {
 
           untrustedResultStreak += 1;
         } finally {
-          inFlightAvailabilityKeysRef.current.delete(key);
+          inFlightAvailabilityKeysRef.current?.delete(key);
 
           if (!cancelled && lookupRunIdRef.current === runId) {
-            setLoadingCount(pendingKeys.size);
+            dispatch({ type: "setLoadingCount", loadingCount: pendingKeys.size });
           }
         }
       }
 
-      while (!cancelled && lookupRunIdRef.current === runId) {
+      async function processNextQueuedMovie(): Promise<void> {
+        if (cancelled || lookupRunIdRef.current !== runId) {
+          return;
+        }
+
         const item = queue.shift();
         if (!item) {
-          break;
+          return;
         }
 
         await lookupMovie(item);
@@ -168,13 +166,17 @@ export function AppShell() {
         if (queue.length > 0 && !cancelled && lookupRunIdRef.current === runId) {
           await delay(getLookupDelayMs(item.attempt, untrustedResultStreak));
         }
+
+        return processNextQueuedMovie();
       }
+
+      await processNextQueuedMovie();
 
       if (cancelled) {
         return;
       }
 
-      setLoadingCount(0);
+      dispatch({ type: "setLoadingCount", loadingCount: 0 });
     })();
 
     return () => {
@@ -203,7 +205,7 @@ export function AppShell() {
         availabilityCacheWriteTimeoutRef.current = undefined;
       }
     };
-  }, [availabilityCache]);
+  }, [state.availabilityCache]);
 
   useEffect(() => {
     function flushAvailabilityCache() {
@@ -231,40 +233,43 @@ export function AppShell() {
   }, []);
 
   const visibleMovies = useMemo(
-    () => filterMovies({ list: activeList, selectedServices, availabilityByMovieKey: availabilityCache, showAll }),
-    [activeList, availabilityCache, selectedServices, showAll],
+    () => filterMovies({
+      list: activeList,
+      selectedServices: state.selectedServices,
+      availabilityByMovieKey: state.availabilityCache,
+      showAll: state.showAll,
+    }),
+    [activeList, state.availabilityCache, state.selectedServices, state.showAll],
   );
 
   function handleToggleService(service: StreamingService) {
-    const next = selectedServices.includes(service)
-      ? selectedServices.filter((selected) => selected !== service)
-      : [...selectedServices, service];
-    setSelectedServicesState(next);
+    const next = state.selectedServices.includes(service)
+      ? state.selectedServices.filter((selected) => selected !== service)
+      : [...state.selectedServices, service];
+    dispatch({ type: "toggleService", service });
     setSelectedServices(next);
   }
 
   function handleImport(list: MovieList) {
-    const next = [list, ...lists];
-    setListsState(next);
+    const next = [list, ...state.lists];
+    dispatch({ type: "importList", list });
     setLists(next);
-    setLastUsedListIdState(list.id);
     setLastUsedListId(list.id);
-    setShowAll(false);
   }
 
   function handleSelectList(listId: string) {
-    setLastUsedListIdState(listId);
+    dispatch({ type: "selectList", listId });
     setLastUsedListId(listId);
   }
 
   function handleDeleteList(listId: string) {
-    const deletedIndex = lists.findIndex((list) => list.id === listId);
+    const deletedIndex = state.lists.findIndex((list) => list.id === listId);
     if (deletedIndex === -1) {
       return;
     }
 
-    const next = lists.filter((list) => list.id !== listId);
-    setListsState(next);
+    const next = state.lists.filter((list) => list.id !== listId);
+    dispatch({ type: "deleteList", listId, activeList });
     setLists(next);
 
     if (activeList?.id !== listId) {
@@ -272,13 +277,11 @@ export function AppShell() {
     }
 
     const nextActiveList = next[deletedIndex] ?? next[deletedIndex - 1];
-    setLastUsedListIdState(nextActiveList?.id);
     if (nextActiveList) {
       setLastUsedListId(nextActiveList.id);
     } else {
       clearLastUsedListId();
     }
-    setShowAll(false);
   }
 
   return (
@@ -292,20 +295,86 @@ export function AppShell() {
       </header>
 
       <div className="stack-lg">
-        <ServiceSelector selectedServices={selectedServices} onToggle={handleToggleService} />
+        <ServiceSelector selectedServices={state.selectedServices} onToggle={handleToggleService} />
         <ImportPanel onImport={handleImport} />
-        <ListPicker lists={lists} activeListId={activeList?.id} onSelect={handleSelectList} onDelete={handleDeleteList} />
+        <ListPicker lists={state.lists} activeListId={activeList?.id} onSelect={handleSelectList} onDelete={handleDeleteList} />
         <MovieListView
           list={activeList}
           movies={visibleMovies}
-          selectedServices={selectedServices}
-          showAll={showAll}
-          onToggleShowAll={setShowAll}
-          loadingCount={loadingCount}
+          selectedServices={state.selectedServices}
+          showAll={state.showAll}
+          onToggleShowAll={(showAll) => dispatch({ type: "setShowAll", showAll })}
+          loadingCount={state.loadingCount}
         />
       </div>
     </main>
   );
+}
+
+function createInitialAppShellState(): AppShellState {
+  return {
+    selectedServices: getSelectedServices(),
+    lists: getLists(),
+    lastUsedListId: getLastUsedListId(),
+    availabilityCache: getAvailabilityCache(),
+    showAll: false,
+    loadingCount: 0,
+  };
+}
+
+function appShellReducer(state: AppShellState, action: AppShellAction): AppShellState {
+  switch (action.type) {
+    case "toggleService": {
+      const selectedServices = state.selectedServices.includes(action.service)
+        ? state.selectedServices.filter((selected) => selected !== action.service)
+        : [...state.selectedServices, action.service];
+      return { ...state, selectedServices };
+    }
+    case "importList":
+      return {
+        ...state,
+        lists: [action.list, ...state.lists],
+        lastUsedListId: action.list.id,
+        showAll: false,
+      };
+    case "selectList":
+      return { ...state, lastUsedListId: action.listId };
+    case "deleteList": {
+      const deletedIndex = state.lists.findIndex((list) => list.id === action.listId);
+      if (deletedIndex === -1) {
+        return state;
+      }
+
+      const lists = state.lists.filter((list) => list.id !== action.listId);
+      if (action.activeList?.id !== action.listId) {
+        return { ...state, lists };
+      }
+
+      const nextActiveList = lists[deletedIndex] ?? lists[deletedIndex - 1];
+      return {
+        ...state,
+        lists,
+        lastUsedListId: nextActiveList?.id,
+        showAll: false,
+      };
+    }
+    case "setShowAll":
+      return { ...state, showAll: action.showAll };
+    case "setLoadingCount":
+      return state.loadingCount === action.loadingCount
+        ? state
+        : { ...state, loadingCount: action.loadingCount };
+    case "setAvailability":
+      return {
+        ...state,
+        availabilityCache: {
+          ...state.availabilityCache,
+          [action.movieKey]: action.availability,
+        },
+      };
+    default:
+      return state;
+  }
 }
 
 function delay(ms: number): Promise<void> {

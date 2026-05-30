@@ -13,32 +13,37 @@ export function filterMovies({ list, selectedServices, availabilityByMovieKey, s
     return [];
   }
 
-  return list.movies
-    .map((movie) => {
-      const key = createMovieId(movie.title, movie.year);
-      return {
-        ...movie,
-        availability: availabilityByMovieKey[key],
-      } satisfies DisplayMovie;
-    })
-    .filter((movie) => {
-      if (showAll) {
-        return true;
-      }
+  const filteredMovies: DisplayMovie[] = [];
+  const selectedServiceSet = new Set(selectedServices);
 
-      const availability = movie.availability;
-      if (!availability) {
-        return false;
-      }
+  for (const movie of list.movies) {
+    const key = createMovieId(movie.title, movie.year);
+    const displayMovie = {
+      ...movie,
+      availability: availabilityByMovieKey[key],
+    } satisfies DisplayMovie;
 
-      if (availability.status !== "available") {
-        return false;
-      }
+    if (showAll) {
+      filteredMovies.push(displayMovie);
+      continue;
+    }
 
-      if (selectedServices.length === 0) {
-        return availability.services.length > 0;
-      }
+    const availability = displayMovie.availability;
+    if (!availability || availability.status !== "available") {
+      continue;
+    }
 
-      return availability.services.some((service) => selectedServices.includes(service));
-    });
+    if (selectedServices.length === 0) {
+      if (availability.services.length > 0) {
+        filteredMovies.push(displayMovie);
+      }
+      continue;
+    }
+
+    if (availability.services.some((service) => selectedServiceSet.has(service))) {
+      filteredMovies.push(displayMovie);
+    }
+  }
+
+  return filteredMovies;
 }
