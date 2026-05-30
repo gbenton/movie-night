@@ -49,6 +49,7 @@ async function fetchBestJustWatchPage(
   year?: number,
 ): Promise<{ movie: JustWatchJsonLdMovie; url: string } | undefined> {
   const urls = [...buildCandidateUrls(title, year)];
+  const inspectedUrls = new Set(urls);
   let bestCandidate: { movie: JustWatchJsonLdMovie; url: string; score: number } | undefined;
 
   async function inspectUrl(url: string): Promise<boolean> {
@@ -80,28 +81,51 @@ async function fetchBestJustWatchPage(
     return score >= 7;
   }
 
-  for (const url of urls) {
-    if (await inspectUrl(url)) {
-      break;
-    }
-  }
+  await inspectUrlsInOrder(urls, inspectUrl);
 
   if (!bestCandidate || bestCandidate.score < 7) {
-    for (const searchResultUrl of await fetchSearchResultUrls(title)) {
-      if (urls.includes(searchResultUrl)) {
-        continue;
-      }
-
-      urls.push(searchResultUrl);
-      if (await inspectUrl(searchResultUrl)) {
-        break;
-      }
-    }
+    await inspectSearchUrlsInOrder(await fetchSearchResultUrls(title), inspectedUrls, inspectUrl);
   }
 
   return bestCandidate && bestCandidate.score >= 4
     ? { movie: bestCandidate.movie, url: bestCandidate.url }
     : undefined;
+}
+
+async function inspectUrlsInOrder(urls: string[], inspectUrl: (url: string) => Promise<boolean>, index = 0): Promise<void> {
+  const url = urls[index];
+  if (!url) {
+    return;
+  }
+
+  if (await inspectUrl(url)) {
+    return;
+  }
+
+  return inspectUrlsInOrder(urls, inspectUrl, index + 1);
+}
+
+async function inspectSearchUrlsInOrder(
+  urls: string[],
+  inspectedUrls: Set<string>,
+  inspectUrl: (url: string) => Promise<boolean>,
+  index = 0,
+): Promise<void> {
+  const url = urls[index];
+  if (!url) {
+    return;
+  }
+
+  if (inspectedUrls.has(url)) {
+    return inspectSearchUrlsInOrder(urls, inspectedUrls, inspectUrl, index + 1);
+  }
+
+  inspectedUrls.add(url);
+  if (await inspectUrl(url)) {
+    return;
+  }
+
+  return inspectSearchUrlsInOrder(urls, inspectedUrls, inspectUrl, index + 1);
 }
 
 function buildCandidateUrls(title: string, year?: number): string[] {
@@ -162,12 +186,14 @@ async function fetchJustWatchHtmlAttempt(url: string, attempt: number): Promise<
 
 function extractMovieUrls(html: string): string[] {
   const urls: string[] = [];
+  const seenUrls = new Set<string>();
   const matches = html.matchAll(/(?:href=["'])?(\/us\/movie\/[^"'?#<>\s\\]+)|\\u002Fus\\u002Fmovie\\u002F([^"'?#<>\s\\]+)/gi);
 
   for (const match of matches) {
     const path = match[1] ?? `/us/movie/${match[2]}`;
     const url = `https://www.justwatch.com${decodeHtmlEntities(path)}`;
-    if (!urls.includes(url)) {
+    if (!seenUrls.has(url)) {
+      seenUrls.add(url);
       urls.push(url);
     }
   }
@@ -272,17 +298,19 @@ function extractServices(candidate: JustWatchJsonLdMovie): StreamingService[] {
 }
 
 function extractProviderLinks(candidate: JustWatchJsonLdMovie): Record<string, string> | undefined {
-  const entries = extractPotentialActions(candidate)
-    .filter(isStreamingAction)
-    .map((action) => {
-      const name = action.expectsAcceptanceOf?.offeredBy?.name;
-      const url = action.target?.urlTemplate;
-      if (!name || !url) {
-        return undefined;
-      }
-      return [mapProviderName(name), decodeHtmlEntities(url)] as const;
-    })
-    .filter((entry): entry is readonly [StreamingService, string] => Boolean(entry));
+  const entries: Array<readonly [StreamingService, string]> = [];
+
+  for (const action of extractPotentialActions(candidate)) {
+    if (!isStreamingAction(action)) {
+      continue;
+    }
+
+    const name = action.expectsAcceptanceOf?.offeredBy?.name;
+    const url = action.target?.urlTemplate;
+    if (name && url) {
+      entries.push([mapProviderName(name), decodeHtmlEntities(url)] as const);
+    }
+  }
 
   return entries.length ? Object.fromEntries(entries) : undefined;
 }

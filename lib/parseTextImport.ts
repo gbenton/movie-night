@@ -7,9 +7,12 @@ const YEAR_PATTERN = /\((\d{4})\)\s*$/;
 export function parseTextImport(input: string): MovieItem[] {
   return input
     .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line, index): MovieItem | undefined => {
+    .flatMap((rawLine, index): MovieItem[] => {
+      const line = rawLine.trim();
+      if (!line) {
+        return [];
+      }
+
       const rankMatch = line.match(RANK_PATTERN);
       const yearMatch = line.match(YEAR_PATTERN);
       const rank = rankMatch ? Number.parseInt(rankMatch[1], 10) : undefined;
@@ -17,18 +20,17 @@ export function parseTextImport(input: string): MovieItem[] {
 
       const title = line.replace(RANK_PATTERN, "").replace(YEAR_PATTERN, "").trim();
       if (!title) {
-        return undefined;
+        return [];
       }
 
-      return {
+      return [{
         id: `${createMovieId(title, year)}__row-${index + 1}`,
         title,
         year,
         rank,
         originalLine: line,
-      } satisfies MovieItem;
-    })
-    .filter((movie): movie is MovieItem => Boolean(movie));
+      } satisfies MovieItem];
+    });
 }
 
 export function createMovieListFromText(name: string, input: string): MovieList {
