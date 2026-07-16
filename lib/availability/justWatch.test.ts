@@ -10,9 +10,11 @@ test.afterEach(() => {
 
 test("fetchJustWatchAvailability parses streaming services from JustWatch JSON-LD", async () => {
   let requestedUrl = "";
+  let requestedInit: RequestInit | undefined;
 
-  globalThis.fetch = async (input) => {
+  globalThis.fetch = async (input, init) => {
     requestedUrl = String(input);
+    requestedInit = init;
     return new Response(
       `
         <html>
@@ -57,6 +59,9 @@ test("fetchJustWatchAvailability parses streaming services from JustWatch JSON-L
   const result = await fetchJustWatchAvailability("parasite__2019", "Parasite", 2019);
 
   assert.equal(requestedUrl, "https://www.justwatch.com/us/movie/parasite-2019");
+  assert.equal(requestedInit?.cache, "no-store");
+  assert.equal((requestedInit?.headers as Record<string, string> | undefined)?.["Accept-Language"], "en-US,en;q=0.9");
+  assert.equal((requestedInit?.headers as Record<string, string> | undefined)?.["Cache-Control"], "no-cache");
   assert.equal(result.status, "available");
   assert.deepEqual(result.services, ["Kanopy"]);
   assert.equal(result.providerLinks?.Kanopy, "https://www.kanopy.com/product/justwatch-11347306");
@@ -344,4 +349,141 @@ test("fetchJustWatchAvailability decodes HTML entities before scoring title matc
   assert.equal(result.justWatchUrl, "https://www.justwatch.com/us/movie/pans-labyrinth");
   assert.equal(result.providerLinks?.Max, "https://play.hbomax.com/show/pans-labyrinth");
   assert.equal(result.matchConfidence, "high");
+});
+
+test("fetchJustWatchAvailability normalizes punctuation before scoring title matches", async () => {
+  const requestedUrls: string[] = [];
+
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    requestedUrls.push(url);
+
+    if (url.endsWith("/borat-cultural-learnings-of-america-for-make-benefit-glorious-nation-of-kazakhstan")) {
+      return new Response(
+        `
+          <head>
+            <link rel="canonical" href="https://www.justwatch.com/us/movie/borat-cultural-learnings-of-america-for-make-benefit-glorious-nation-of-kazakhstan">
+            <script type="application/ld+json">
+              {
+                "@type": "Movie",
+                "name": "Borat: Cultural Learnings of America for Make Benefit Glorious Nation of Kazakhstan",
+                "dateCreated": "2006-11-01",
+                "potentialAction": {
+                  "@type": "WatchAction",
+                  "target": { "@type": "EntryPoint", "urlTemplate": "https://www.netflix.com/title/70044605" },
+                  "expectsAcceptanceOf": {
+                    "@type": "Offer",
+                    "businessFunction": "https://schema.org/ProvideService",
+                    "offeredBy": { "@type": "Organization", "name": "Netflix" }
+                  }
+                }
+              }
+            </script>
+          </head>
+        `,
+        { status: 200, headers: { "Content-Type": "text/html" } },
+      );
+    }
+
+    return new Response("", { status: 404 });
+  };
+
+  const result = await fetchJustWatchAvailability(
+    "borat-cultural-learnings-of-america-for-make-benefit-glorious-nation-of-kazakhstan",
+    "Borat! Cultural Learnings of America for Make Benefit Glorious Nation of Kazakhstan",
+    2006,
+  );
+
+  assert.deepEqual(requestedUrls, [
+    "https://www.justwatch.com/us/movie/borat-cultural-learnings-of-america-for-make-benefit-glorious-nation-of-kazakhstan-2006",
+    "https://www.justwatch.com/us/movie/borat-cultural-learnings-of-america-for-make-benefit-glorious-nation-of-kazakhstan",
+  ]);
+  assert.equal(result.status, "available");
+  assert.deepEqual(result.services, ["Netflix"]);
+  assert.equal(result.providerLinks?.Netflix, "https://www.netflix.com/title/70044605");
+  assert.equal(result.matchConfidence, "high");
+});
+
+test("fetchJustWatchAvailability retries transient JustWatch responses", async () => {
+  const requestedUrls: string[] = [];
+
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    requestedUrls.push(url);
+
+    if (requestedUrls.length === 1) {
+      return new Response("Service unavailable", { status: 503 });
+    }
+
+    return new Response(
+      `
+        <script type="application/ld+json">
+          {
+            "@type": "Movie",
+            "name": "Tropic Thunder",
+            "dateCreated": "2008-08-13",
+            "potentialAction": {
+              "@type": "WatchAction",
+              "target": { "@type": "EntryPoint", "urlTemplate": "https://www.kanopy.com/product/justwatch-13137636" },
+              "expectsAcceptanceOf": {
+                "@type": "Offer",
+                "businessFunction": "https://schema.org/ProvideService",
+                "offeredBy": { "@type": "Organization", "name": "Kanopy" }
+              }
+            }
+          }
+        </script>
+      `,
+      { status: 200, headers: { "Content-Type": "text/html" } },
+    );
+  };
+
+  const result = await fetchJustWatchAvailability("tropic-thunder__2008", "Tropic Thunder", 2008);
+
+  assert.deepEqual(requestedUrls, [
+    "https://www.justwatch.com/us/movie/tropic-thunder-2008",
+    "https://www.justwatch.com/us/movie/tropic-thunder-2008",
+  ]);
+  assert.equal(result.status, "available");
+  assert.deepEqual(result.services, ["Kanopy"]);
+  assert.equal(result.matchConfidence, "high");
+});
+
+test("fetchJustWatchAvailability marks sustained rate limits as retryable unknowns", async () => {
+  const originalConsoleError = console.error;
+  const requestedUrls: string[] = [];
+  globalThis.fetch = async (input) => {
+    requestedUrls.push(String(input));
+    return new Response("Too many requests", { status: 429 });
+  };
+
+  console.error = () => {};
+
+  try {
+    const result = await fetchJustWatchAvailability("ghostbusters", "Ghostbusters", 1984);
+
+    assert.deepEqual(requestedUrls, ["https://www.justwatch.com/us/movie/ghostbusters-1984"]);
+    assert.equal(result.status, "unknown");
+    assert.equal(result.failureReason, "rate_limited");
+    assert.equal(result.retryAfterMs, 20_000);
+    assert.equal(result.matchConfidence, "low");
+  } finally {
+    console.error = originalConsoleError;
+  }
+});
+
+test("fetchJustWatchAvailability treats blocked JustWatch pages as unknown instead of unavailable", async () => {
+  const originalConsoleError = console.error;
+  globalThis.fetch = async () => new Response("verify you are human", { status: 200 });
+
+  console.error = () => {};
+
+  try {
+    const result = await fetchJustWatchAvailability("ghostbusters", "Ghostbusters");
+
+    assert.equal(result.status, "unknown");
+    assert.equal(result.matchConfidence, "low");
+  } finally {
+    console.error = originalConsoleError;
+  }
 });

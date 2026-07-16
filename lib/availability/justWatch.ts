@@ -1,4 +1,4 @@
-import { slugifyTitle } from "../normalize";
+import { normalizeTitle, slugifyTitle } from "../normalize";
 import { mapProviderName } from "../providerLinks";
 import type { AvailabilityResult, StreamingService } from "../types";
 import type { JustWatchJsonLdMovie, JustWatchPotentialAction } from "./types";
@@ -6,6 +6,10 @@ import type { JustWatchJsonLdMovie, JustWatchPotentialAction } from "./types";
 const JUSTWATCH_MOVIE_URL = "https://www.justwatch.com/us/movie";
 const JUSTWATCH_SEARCH_URL = "https://www.justwatch.com/us/search";
 const JUSTWATCH_REQUEST_TIMEOUT_MS = 5_000;
+const JUSTWATCH_FETCH_ATTEMPTS = 2;
+const JUSTWATCH_RETRY_DELAY_MS = 250;
+const JUSTWATCH_RATE_LIMIT_RETRY_AFTER_MS = 20_000;
+const RETRYABLE_STATUS_CODES = new Set([403, 408, 425, 429, 500, 502, 503, 504]);
 
 const STREAMING_BUSINESS_FUNCTIONS = new Set([
   "https://schema.org/ProvideService",
@@ -37,7 +41,7 @@ export async function fetchJustWatchAvailability(movieId: string, title: string,
     };
   } catch (error) {
     console.error("JustWatch lookup failed", { movieId, title, year, error });
-    return buildFallbackAvailability(movieId, title, year, "unknown");
+    return buildFallbackAvailability(movieId, title, year, "unknown", classifyLookupFailure(error));
   }
 }
 
@@ -46,16 +50,25 @@ async function fetchBestJustWatchPage(
   year?: number,
 ): Promise<{ movie: JustWatchJsonLdMovie; url: string } | undefined> {
   const urls = [...buildCandidateUrls(title, year)];
+  const inspectedUrls = new Set(urls);
   let bestCandidate: { movie: JustWatchJsonLdMovie; url: string; score: number } | undefined;
 
   async function inspectUrl(url: string): Promise<boolean> {
     const response = await fetchJustWatchHtml(url);
+
+    if (RETRYABLE_STATUS_CODES.has(response.status)) {
+      throw buildRetryableStatusError(response, url);
+    }
 
     if (!response.ok) {
       return false;
     }
 
     const html = await response.text();
+    if (isLikelyBlockedHtml(html)) {
+      throw new Error(`JustWatch returned a blocked or incomplete page for ${url}`);
+    }
+
     const movie = extractJsonLdMovie(html);
     if (!movie) {
       return false;
@@ -69,28 +82,51 @@ async function fetchBestJustWatchPage(
     return score >= 7;
   }
 
-  for (const url of urls) {
-    if (await inspectUrl(url)) {
-      break;
-    }
-  }
+  await inspectUrlsInOrder(urls, inspectUrl);
 
   if (!bestCandidate || bestCandidate.score < 7) {
-    for (const searchResultUrl of await fetchSearchResultUrls(title)) {
-      if (urls.includes(searchResultUrl)) {
-        continue;
-      }
-
-      urls.push(searchResultUrl);
-      if (await inspectUrl(searchResultUrl)) {
-        break;
-      }
-    }
+    await inspectSearchUrlsInOrder(await fetchSearchResultUrls(title), inspectedUrls, inspectUrl);
   }
 
   return bestCandidate && bestCandidate.score >= 4
     ? { movie: bestCandidate.movie, url: bestCandidate.url }
     : undefined;
+}
+
+async function inspectUrlsInOrder(urls: string[], inspectUrl: (url: string) => Promise<boolean>, index = 0): Promise<void> {
+  const url = urls[index];
+  if (!url) {
+    return;
+  }
+
+  if (await inspectUrl(url)) {
+    return;
+  }
+
+  return inspectUrlsInOrder(urls, inspectUrl, index + 1);
+}
+
+async function inspectSearchUrlsInOrder(
+  urls: string[],
+  inspectedUrls: Set<string>,
+  inspectUrl: (url: string) => Promise<boolean>,
+  index = 0,
+): Promise<void> {
+  const url = urls[index];
+  if (!url) {
+    return;
+  }
+
+  if (inspectedUrls.has(url)) {
+    return inspectSearchUrlsInOrder(urls, inspectedUrls, inspectUrl, index + 1);
+  }
+
+  inspectedUrls.add(url);
+  if (await inspectUrl(url)) {
+    return;
+  }
+
+  return inspectSearchUrlsInOrder(urls, inspectedUrls, inspectUrl, index + 1);
 }
 
 function buildCandidateUrls(title: string, year?: number): string[] {
@@ -115,24 +151,62 @@ async function fetchSearchResultUrls(title: string): Promise<string[]> {
 }
 
 function fetchJustWatchHtml(url: string): Promise<Response> {
-  return fetch(url, {
-    headers: {
-      Accept: "text/html,application/xhtml+xml",
-      "User-Agent": "Mozilla/5.0",
-    },
-    next: { revalidate: 0 },
-    signal: AbortSignal.timeout(JUSTWATCH_REQUEST_TIMEOUT_MS),
-  });
+  return fetchJustWatchHtmlAttempt(url, 1);
+}
+
+async function fetchJustWatchHtmlAttempt(url: string, attempt: number): Promise<Response> {
+  try {
+    const response = await fetch(url, {
+      cache: "no-store",
+      headers: {
+        Accept: "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        Pragma: "no-cache",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+      },
+      next: { revalidate: 0 },
+      signal: AbortSignal.timeout(JUSTWATCH_REQUEST_TIMEOUT_MS),
+    });
+
+    if (response.status === 429) {
+      throw buildRetryableStatusError(response, url);
+    }
+
+    if (RETRYABLE_STATUS_CODES.has(response.status)) {
+      if (attempt >= JUSTWATCH_FETCH_ATTEMPTS) {
+        throw buildRetryableStatusError(response, url);
+      }
+
+      await delay(JUSTWATCH_RETRY_DELAY_MS * attempt);
+      return fetchJustWatchHtmlAttempt(url, attempt + 1);
+    }
+
+    return response;
+  } catch (error) {
+    if (error instanceof JustWatchRateLimitError) {
+      throw error;
+    }
+
+    if (attempt < JUSTWATCH_FETCH_ATTEMPTS) {
+      await delay(JUSTWATCH_RETRY_DELAY_MS * attempt);
+      return fetchJustWatchHtmlAttempt(url, attempt + 1);
+    }
+
+    throw error;
+  }
 }
 
 function extractMovieUrls(html: string): string[] {
   const urls: string[] = [];
+  const seenUrls = new Set<string>();
   const matches = html.matchAll(/(?:href=["'])?(\/us\/movie\/[^"'?#<>\s\\]+)|\\u002Fus\\u002Fmovie\\u002F([^"'?#<>\s\\]+)/gi);
 
   for (const match of matches) {
     const path = match[1] ?? `/us/movie/${match[2]}`;
     const url = `https://www.justwatch.com${decodeHtmlEntities(path)}`;
-    if (!urls.includes(url)) {
+    if (!seenUrls.has(url)) {
+      seenUrls.add(url);
       urls.push(url);
     }
   }
@@ -156,6 +230,10 @@ function extractJsonLdMovie(html: string): JustWatchJsonLdMovie | undefined {
   }
 
   return undefined;
+}
+
+function isLikelyBlockedHtml(html: string): boolean {
+  return /cf-chl-|just a moment|verify you are human|access denied|unusual traffic/i.test(html);
 }
 
 function findMovieJsonLd(value: unknown): JustWatchJsonLdMovie | undefined {
@@ -188,8 +266,8 @@ function extractCanonicalUrl(html: string): string | undefined {
 
 function scoreMovie(candidate: JustWatchJsonLdMovie, title: string, year?: number): number {
   let score = 0;
-  const candidateTitle = (getText(candidate.name) ?? "").trim().toLowerCase();
-  const normalizedTitle = title.trim().toLowerCase();
+  const candidateTitle = normalizeTitle(getText(candidate.name) ?? "");
+  const normalizedTitle = normalizeTitle(title);
   const candidateYear = extractYear(candidate.dateCreated);
 
   if (typeof year === "number" && typeof candidateYear === "number" && candidateYear !== year) {
@@ -233,17 +311,19 @@ function extractServices(candidate: JustWatchJsonLdMovie): StreamingService[] {
 }
 
 function extractProviderLinks(candidate: JustWatchJsonLdMovie): Record<string, string> | undefined {
-  const entries = extractPotentialActions(candidate)
-    .filter(isStreamingAction)
-    .map((action) => {
-      const name = action.expectsAcceptanceOf?.offeredBy?.name;
-      const url = action.target?.urlTemplate;
-      if (!name || !url) {
-        return undefined;
-      }
-      return [mapProviderName(name), decodeHtmlEntities(url)] as const;
-    })
-    .filter((entry): entry is readonly [StreamingService, string] => Boolean(entry));
+  const entries: Array<readonly [StreamingService, string]> = [];
+
+  for (const action of extractPotentialActions(candidate)) {
+    if (!isStreamingAction(action)) {
+      continue;
+    }
+
+    const name = action.expectsAcceptanceOf?.offeredBy?.name;
+    const url = action.target?.urlTemplate;
+    if (name && url) {
+      entries.push([mapProviderName(name), decodeHtmlEntities(url)] as const);
+    }
+  }
 
   return entries.length ? Object.fromEntries(entries) : undefined;
 }
@@ -266,8 +346,8 @@ function isStreamingAction(action: JustWatchPotentialAction): boolean {
 }
 
 function deriveConfidence(candidate: JustWatchJsonLdMovie, title: string, year?: number): "high" | "medium" | "low" {
-  const candidateTitle = (getText(candidate.name) ?? "").trim().toLowerCase();
-  const normalizedTitle = title.trim().toLowerCase();
+  const candidateTitle = normalizeTitle(getText(candidate.name) ?? "");
+  const normalizedTitle = normalizeTitle(title);
   const candidateYear = extractYear(candidate.dateCreated);
 
   if (candidateTitle === normalizedTitle && (!year || candidateYear === year)) {
@@ -305,6 +385,7 @@ function buildFallbackAvailability(
   title: string,
   year: number | undefined,
   status: "unavailable" | "unknown",
+  failure?: Pick<AvailabilityResult, "failureReason" | "retryAfterMs">,
 ): AvailabilityResult {
   return {
     movieId,
@@ -315,6 +396,7 @@ function buildFallbackAvailability(
     status,
     matchConfidence: "low",
     justWatchUrl: buildFallbackJustWatchUrl(title),
+    ...failure,
   };
 }
 
@@ -330,4 +412,55 @@ function decodeHtmlEntities(value: string): string {
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">");
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+class JustWatchRateLimitError extends Error {
+  readonly retryAfterMs: number;
+
+  constructor(retryAfterMs: number) {
+    super("JustWatch returned 429");
+    this.name = "JustWatchRateLimitError";
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+function buildRetryableStatusError(response: Response, url: string): Error {
+  if (response.status === 429) {
+    return new JustWatchRateLimitError(parseRetryAfterMs(response.headers.get("Retry-After")));
+  }
+
+  return new Error(`JustWatch returned ${response.status} for ${url}`);
+}
+
+function parseRetryAfterMs(value: string | null): number {
+  if (!value) {
+    return JUSTWATCH_RATE_LIMIT_RETRY_AFTER_MS;
+  }
+
+  const retryAfterSeconds = Number.parseInt(value, 10);
+  if (Number.isFinite(retryAfterSeconds)) {
+    return Math.max(JUSTWATCH_RATE_LIMIT_RETRY_AFTER_MS, retryAfterSeconds * 1_000);
+  }
+
+  const retryAt = Date.parse(value);
+  if (!Number.isNaN(retryAt)) {
+    return Math.max(JUSTWATCH_RATE_LIMIT_RETRY_AFTER_MS, retryAt - Date.now());
+  }
+
+  return JUSTWATCH_RATE_LIMIT_RETRY_AFTER_MS;
+}
+
+function classifyLookupFailure(error: unknown): Pick<AvailabilityResult, "failureReason" | "retryAfterMs"> {
+  if (error instanceof JustWatchRateLimitError) {
+    return {
+      failureReason: "rate_limited",
+      retryAfterMs: error.retryAfterMs,
+    };
+  }
+
+  return { failureReason: "lookup_failed" };
 }

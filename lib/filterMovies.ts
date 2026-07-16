@@ -9,37 +9,55 @@ interface FilterOptions {
   includePending?: boolean;
 }
 
-export function filterMovies({ list, selectedServices, availabilityByMovieKey, showAll, includePending = false }: FilterOptions): DisplayMovie[] {
+export function filterMovies({
+  list,
+  selectedServices,
+  availabilityByMovieKey,
+  showAll,
+  includePending = false,
+}: FilterOptions): DisplayMovie[] {
   if (!list) {
     return [];
   }
 
-  return list.movies
-    .map((movie) => {
-      const key = createMovieId(movie.title, movie.year);
-      return {
-        ...movie,
-        availability: availabilityByMovieKey[key],
-      } satisfies DisplayMovie;
-    })
-    .filter((movie) => {
-      if (showAll) {
-        return true;
-      }
+  const filteredMovies: DisplayMovie[] = [];
+  const selectedServiceSet = new Set(selectedServices);
 
-      const availability = movie.availability;
-      if (!availability) {
-        return includePending;
-      }
+  for (const movie of list.movies) {
+    const key = createMovieId(movie.title, movie.year);
+    const displayMovie = {
+      ...movie,
+      availability: availabilityByMovieKey[key],
+    } satisfies DisplayMovie;
 
-      if (availability.status !== "available") {
-        return false;
-      }
+    if (showAll) {
+      filteredMovies.push(displayMovie);
+      continue;
+    }
 
-      if (selectedServices.length === 0) {
-        return availability.services.length > 0;
+    const availability = displayMovie.availability;
+    if (!availability) {
+      if (includePending) {
+        filteredMovies.push(displayMovie);
       }
+      continue;
+    }
 
-      return availability.services.some((service) => selectedServices.includes(service));
-    });
+    if (availability.status !== "available") {
+      continue;
+    }
+
+    if (selectedServices.length === 0) {
+      if (availability.services.length > 0) {
+        filteredMovies.push(displayMovie);
+      }
+      continue;
+    }
+
+    if (availability.services.some((service) => selectedServiceSet.has(service))) {
+      filteredMovies.push(displayMovie);
+    }
+  }
+
+  return filteredMovies;
 }

@@ -11,12 +11,22 @@ export function isAvailabilityFresh(entry?: AvailabilityResult): boolean {
     return false;
   }
 
-  const age = Date.now() - checkedAt;
-  const shouldRetrySoon = (
-    entry.status === "unknown"
-    || (entry.status === "unavailable" && entry.services.length === 0 && !entry.justWatchUrl && !entry.providerLinks)
-    || (entry.status === "unavailable" && entry.services.length === 0 && entry.matchConfidence === "low")
-  );
+  const ttl = isAvailabilityTrusted(entry) ? AVAILABILITY_TTL_MS : AVAILABILITY_RETRY_TTL_MS;
+  return Date.now() - checkedAt < ttl;
+}
 
-  return age < (shouldRetrySoon ? AVAILABILITY_RETRY_TTL_MS : AVAILABILITY_TTL_MS);
+export function isAvailabilityTrusted(entry?: AvailabilityResult): boolean {
+  if (!entry || entry.status === "unknown") {
+    return false;
+  }
+
+  if (entry.status !== "unavailable" || entry.services.length > 0) {
+    return true;
+  }
+
+  if (!entry.justWatchUrl && !entry.providerLinks) {
+    return false;
+  }
+
+  return entry.matchConfidence !== "low";
 }

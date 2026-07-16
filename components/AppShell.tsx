@@ -1,15 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import { ImportPanel } from "./ImportPanel";
 import { ListPicker } from "./ListPicker";
 import { MovieListView } from "./MovieListView";
 import { ServiceSelector } from "./ServiceSelector";
+import { AVAILABILITY_LOOKUP_MAX_ATTEMPTS, useAvailabilityLookupQueue } from "./useAvailabilityLookupQueue";
 import { createBatcher, type Batcher } from "../lib/availability/batcher";
-import { isAvailabilityFresh } from "../lib/availability/cache";
-import { runWithConcurrency } from "../lib/availability/lookupQueue";
 import { filterMovies } from "../lib/filterMovies";
-import { createMovieId } from "../lib/normalize";
 import {
   getAvailabilityCache,
   getLastUsedListId,
@@ -21,238 +19,183 @@ import {
   setLists,
   setSelectedServices,
 } from "../lib/storage";
-import type { AvailabilityResult, MovieItem, MovieList, StreamingService } from "../lib/types";
+import type { AvailabilityResult, MovieList, StreamingService } from "../lib/types";
 
-const AVAILABILITY_LOOKUP_CONCURRENCY = 8;
-const AVAILABILITY_CLIENT_TIMEOUT_MS = 8_000;
+const AVAILABILITY_CACHE_WRITE_DEBOUNCE_MS = 2_000;
 const AVAILABILITY_UI_BATCH_MS = 120;
-const AVAILABILITY_CACHE_WRITE_MS = 750;
 
-interface LookupProgress {
-  total: number;
-  remaining: number;
+interface AppShellState {
+  selectedServices: StreamingService[];
+  lists: MovieList[];
+  lastUsedListId?: string;
+  availabilityCache: Record<string, AvailabilityResult>;
+  showAll: boolean;
+  loadingCount: number;
+  retryCount: number;
+  retryAttempt: number;
 }
 
 interface QueuedAvailabilityUpdate {
-  key: string;
-  value: AvailabilityResult;
+  movieKey: string;
+  availability: AvailabilityResult;
 }
 
+type AppShellAction =
+  | { type: "hydrate"; state: AppShellState }
+  | { type: "toggleService"; service: StreamingService }
+  | { type: "importList"; list: MovieList }
+  | { type: "selectList"; listId: string }
+  | { type: "deleteList"; listId: string; activeList?: MovieList }
+  | { type: "setShowAll"; showAll: boolean }
+  | { type: "setLoadingCount"; loadingCount: number }
+  | { type: "setRetryCount"; retryCount: number }
+  | { type: "setRetryAttempt"; retryAttempt: number }
+  | { type: "setAvailabilityBatch"; updates: QueuedAvailabilityUpdate[] };
+
 export function AppShell() {
-  const [selectedServices, setSelectedServicesState] = useState<StreamingService[]>([]);
-  const [lists, setListsState] = useState<MovieList[]>([]);
-  const [lastUsedListId, setLastUsedListIdState] = useState<string>();
-  const [availabilityCache, setAvailabilityCacheState] = useState<Record<string, AvailabilityResult>>({});
-  const [showAll, setShowAll] = useState(false);
-  const [lookupProgress, setLookupProgress] = useState<LookupProgress>({ total: 0, remaining: 0 });
-  const lookupRunIdRef = useRef(0);
-  const inFlightAvailabilityKeysRef = useRef(new Set<string>());
-  const availabilityCacheRef = useRef<Record<string, AvailabilityResult>>({});
-  const lookupProgressRef = useRef<LookupProgress>({ total: 0, remaining: 0 });
-  const cacheWriteTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const [state, dispatch] = useReducer(appShellReducer, undefined, createEmptyAppShellState);
+  const skipNextAvailabilityCacheWriteRef = useRef(true);
+  const availabilityCacheRef = useRef<Record<string, AvailabilityResult>>(state.availabilityCache);
+  const availabilityCacheWriteTimeoutRef = useRef<number | undefined>(undefined);
   const availabilityBatcherRef = useRef<Batcher<QueuedAvailabilityUpdate> | undefined>(undefined);
 
   if (!availabilityBatcherRef.current) {
     availabilityBatcherRef.current = createBatcher((updates) => {
-      const mergedUpdates = Object.fromEntries(updates.map(({ key, value }) => [key, value]));
-      const nextCache = { ...availabilityCacheRef.current, ...mergedUpdates };
-      availabilityCacheRef.current = nextCache;
-      setAvailabilityCacheState(nextCache);
-      setLookupProgress({ ...lookupProgressRef.current });
-      scheduleAvailabilityCacheWrite();
+      const nextAvailabilityCache = { ...availabilityCacheRef.current };
+      for (const { movieKey, availability } of updates) {
+        nextAvailabilityCache[movieKey] = availability;
+      }
+      availabilityCacheRef.current = nextAvailabilityCache;
+      dispatch({ type: "setAvailabilityBatch", updates });
     }, AVAILABILITY_UI_BATCH_MS);
   }
 
   useEffect(() => {
-    setSelectedServicesState(getSelectedServices());
-    setListsState(getLists());
-    setLastUsedListIdState(getLastUsedListId());
-    const storedAvailability = getAvailabilityCache();
-    availabilityCacheRef.current = storedAvailability;
-    setAvailabilityCacheState(storedAvailability);
+    const hydratedState = createInitialAppShellState();
+    availabilityCacheRef.current = hydratedState.availabilityCache;
+    dispatch({ type: "hydrate", state: hydratedState });
   }, []);
 
   useEffect(() => {
-    function persistBeforeLeaving() {
+    availabilityCacheRef.current = state.availabilityCache;
+  }, [state.availabilityCache]);
+
+  const activeList = useMemo(
+    () => state.lists.find((list) => list.id === state.lastUsedListId) ?? state.lists[0],
+    [state.lists, state.lastUsedListId],
+  );
+
+  const handleAvailability = useCallback((movieKey: string, availability: AvailabilityResult) => {
+    availabilityBatcherRef.current?.add({ movieKey, availability });
+  }, []);
+  const handleLoadingCountChange = useCallback((loadingCount: number) => {
+    dispatch({ type: "setLoadingCount", loadingCount });
+  }, []);
+  const handleRetryAttemptChange = useCallback((retryAttempt: number) => {
+    dispatch({ type: "setRetryAttempt", retryAttempt });
+  }, []);
+  const handleRetryCountChange = useCallback((retryCount: number) => {
+    dispatch({ type: "setRetryCount", retryCount });
+  }, []);
+
+  useAvailabilityLookupQueue({
+    activeList,
+    availabilityCache: state.availabilityCache,
+    onAvailability: handleAvailability,
+    onLoadingCountChange: handleLoadingCountChange,
+    onRetryAttemptChange: handleRetryAttemptChange,
+    onRetryCountChange: handleRetryCountChange,
+  });
+
+  useEffect(() => {
+    if (skipNextAvailabilityCacheWriteRef.current) {
+      skipNextAvailabilityCacheWriteRef.current = false;
+      return;
+    }
+
+    if (availabilityCacheWriteTimeoutRef.current) {
+      window.clearTimeout(availabilityCacheWriteTimeoutRef.current);
+    }
+
+    availabilityCacheWriteTimeoutRef.current = window.setTimeout(() => {
+      setAvailabilityCache(availabilityCacheRef.current);
+      availabilityCacheWriteTimeoutRef.current = undefined;
+    }, AVAILABILITY_CACHE_WRITE_DEBOUNCE_MS);
+
+    return () => {
+      if (availabilityCacheWriteTimeoutRef.current) {
+        window.clearTimeout(availabilityCacheWriteTimeoutRef.current);
+        availabilityCacheWriteTimeoutRef.current = undefined;
+      }
+    };
+  }, [state.availabilityCache]);
+
+  useEffect(() => {
+    function flushAvailabilityCache() {
       availabilityBatcherRef.current?.flush();
+      if (availabilityCacheWriteTimeoutRef.current) {
+        window.clearTimeout(availabilityCacheWriteTimeoutRef.current);
+        availabilityCacheWriteTimeoutRef.current = undefined;
+      }
+
       setAvailabilityCache(availabilityCacheRef.current);
     }
 
-    window.addEventListener("pagehide", persistBeforeLeaving);
-    return () => {
-      window.removeEventListener("pagehide", persistBeforeLeaving);
-      availabilityBatcherRef.current?.cancel();
-      if (cacheWriteTimerRef.current) {
-        clearTimeout(cacheWriteTimerRef.current);
+    function flushWhenHidden() {
+      if (document.visibilityState === "hidden") {
+        flushAvailabilityCache();
       }
+    }
+
+    window.addEventListener("pagehide", flushAvailabilityCache);
+    document.addEventListener("visibilitychange", flushWhenHidden);
+
+    return () => {
+      window.removeEventListener("pagehide", flushAvailabilityCache);
+      document.removeEventListener("visibilitychange", flushWhenHidden);
+      availabilityBatcherRef.current?.cancel();
     };
   }, []);
-
-  const activeList = useMemo(
-    () => lists.find((list) => list.id === lastUsedListId) ?? lists[0],
-    [lists, lastUsedListId],
-  );
-
-  useEffect(() => {
-    if (!activeList) {
-      lookupRunIdRef.current += 1;
-      lookupProgressRef.current = { total: 0, remaining: 0 };
-      setLookupProgress(lookupProgressRef.current);
-      return;
-    }
-
-    if (activeList.id !== lastUsedListId) {
-      setLastUsedListIdState(activeList.id);
-      setLastUsedListId(activeList.id);
-    }
-  }, [activeList, lastUsedListId]);
-
-  useEffect(() => {
-    if (!activeList) {
-      lookupRunIdRef.current += 1;
-      lookupProgressRef.current = { total: 0, remaining: 0 };
-      setLookupProgress(lookupProgressRef.current);
-      return;
-    }
-
-    const runId = lookupRunIdRef.current + 1;
-    lookupRunIdRef.current = runId;
-    const inFlightAvailabilityKeys = inFlightAvailabilityKeysRef.current;
-
-    const staleMovieByKey = new Map<string, MovieItem>();
-    for (const movie of activeList.movies) {
-      const key = createMovieId(movie.title, movie.year);
-      const availability = availabilityCacheRef.current[key];
-      if (
-        !inFlightAvailabilityKeys.has(key) &&
-        !isAvailabilityFresh(availability)
-      ) {
-        staleMovieByKey.set(key, movie);
-      }
-    }
-
-    const staleMovies = Array.from(staleMovieByKey.values());
-    if (staleMovies.length === 0) {
-      lookupProgressRef.current = { total: 0, remaining: 0 };
-      setLookupProgress(lookupProgressRef.current);
-      return;
-    }
-
-    const controller = new AbortController();
-    lookupProgressRef.current = { total: staleMovies.length, remaining: staleMovies.length };
-    setLookupProgress(lookupProgressRef.current);
-
-    void runWithConcurrency(
-      staleMovies,
-      AVAILABILITY_LOOKUP_CONCURRENCY,
-      async (movie: MovieItem) => {
-        const key = createMovieId(movie.title, movie.year);
-        inFlightAvailabilityKeys.add(key);
-        let update: AvailabilityResult | undefined;
-
-        try {
-          const response = await fetch(`/api/availability/${encodeURIComponent(movie.id)}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ title: movie.title, year: movie.year }),
-            signal: AbortSignal.any([
-              controller.signal,
-              AbortSignal.timeout(AVAILABILITY_CLIENT_TIMEOUT_MS),
-            ]),
-          });
-
-          if (!response.ok) {
-            throw new Error(`Lookup failed for ${movie.title}`);
-          }
-
-          update = (await response.json()) as AvailabilityResult;
-        } catch {
-          if (!controller.signal.aborted) {
-            update = {
-              movieId: movie.id,
-              title: movie.title,
-              year: movie.year,
-              services: [],
-              lastCheckedAt: new Date().toISOString(),
-              status: "unknown",
-              matchConfidence: "low",
-            };
-          }
-        } finally {
-          inFlightAvailabilityKeys.delete(key);
-
-          if (update) {
-            if (!controller.signal.aborted && lookupRunIdRef.current === runId) {
-              lookupProgressRef.current = {
-                ...lookupProgressRef.current,
-                remaining: Math.max(lookupProgressRef.current.remaining - 1, 0),
-              };
-            }
-            availabilityBatcherRef.current?.add({ key, value: update });
-          }
-        }
-      },
-      controller.signal,
-    );
-
-    return () => {
-      controller.abort();
-      inFlightAvailabilityKeys.clear();
-    };
-  }, [activeList]);
 
   const visibleMovies = useMemo(
     () => filterMovies({
       list: activeList,
-      selectedServices,
-      availabilityByMovieKey: availabilityCache,
-      showAll,
-      includePending: lookupProgress.remaining > 0,
+      selectedServices: state.selectedServices,
+      availabilityByMovieKey: state.availabilityCache,
+      showAll: state.showAll,
+      includePending: state.loadingCount > 0 || state.retryCount > 0,
     }),
-    [activeList, availabilityCache, lookupProgress.remaining, selectedServices, showAll],
+    [activeList, state.availabilityCache, state.loadingCount, state.retryCount, state.selectedServices, state.showAll],
   );
 
-  function scheduleAvailabilityCacheWrite() {
-    if (cacheWriteTimerRef.current) {
-      return;
-    }
-
-    cacheWriteTimerRef.current = setTimeout(() => {
-      cacheWriteTimerRef.current = undefined;
-      setAvailabilityCache(availabilityCacheRef.current);
-    }, AVAILABILITY_CACHE_WRITE_MS);
-  }
-
   function handleToggleService(service: StreamingService) {
-    const next = selectedServices.includes(service)
-      ? selectedServices.filter((selected) => selected !== service)
-      : [...selectedServices, service];
-    setSelectedServicesState(next);
+    const next = state.selectedServices.includes(service)
+      ? state.selectedServices.filter((selected) => selected !== service)
+      : [...state.selectedServices, service];
+    dispatch({ type: "toggleService", service });
     setSelectedServices(next);
   }
 
   function handleImport(list: MovieList) {
-    const next = [list, ...lists];
-    setListsState(next);
+    const next = [list, ...state.lists];
+    dispatch({ type: "importList", list });
     setLists(next);
-    setLastUsedListIdState(list.id);
     setLastUsedListId(list.id);
-    setShowAll(false);
   }
 
   function handleSelectList(listId: string) {
-    setLastUsedListIdState(listId);
+    dispatch({ type: "selectList", listId });
     setLastUsedListId(listId);
   }
 
   function handleDeleteList(listId: string) {
-    const deletedIndex = lists.findIndex((list) => list.id === listId);
+    const deletedIndex = state.lists.findIndex((list) => list.id === listId);
     if (deletedIndex === -1) {
       return;
     }
 
-    const next = lists.filter((list) => list.id !== listId);
-    setListsState(next);
+    const next = state.lists.filter((list) => list.id !== listId);
+    dispatch({ type: "deleteList", listId, activeList });
     setLists(next);
 
     if (activeList?.id !== listId) {
@@ -260,13 +203,11 @@ export function AppShell() {
     }
 
     const nextActiveList = next[deletedIndex] ?? next[deletedIndex - 1];
-    setLastUsedListIdState(nextActiveList?.id);
     if (nextActiveList) {
       setLastUsedListId(nextActiveList.id);
     } else {
       clearLastUsedListId();
     }
-    setShowAll(false);
   }
 
   return (
@@ -280,19 +221,110 @@ export function AppShell() {
       </header>
 
       <div className="stack-lg">
-        <ServiceSelector selectedServices={selectedServices} onToggle={handleToggleService} />
+        <ServiceSelector selectedServices={state.selectedServices} onToggle={handleToggleService} />
         <ImportPanel onImport={handleImport} />
-        <ListPicker lists={lists} activeListId={activeList?.id} onSelect={handleSelectList} onDelete={handleDeleteList} />
+        <ListPicker lists={state.lists} activeListId={activeList?.id} onSelect={handleSelectList} onDelete={handleDeleteList} />
         <MovieListView
           list={activeList}
           movies={visibleMovies}
-          selectedServices={selectedServices}
-          showAll={showAll}
-          onToggleShowAll={setShowAll}
-          loadingCount={lookupProgress.remaining}
-          loadingTotal={lookupProgress.total}
+          selectedServices={state.selectedServices}
+          showAll={state.showAll}
+          onToggleShowAll={(showAll) => dispatch({ type: "setShowAll", showAll })}
+          loadingCount={state.loadingCount}
+          retryCount={state.retryCount}
+          retryAttempt={state.retryAttempt}
+          retryAttemptLimit={AVAILABILITY_LOOKUP_MAX_ATTEMPTS}
         />
       </div>
     </main>
   );
+}
+
+function createInitialAppShellState(): AppShellState {
+  return {
+    selectedServices: getSelectedServices(),
+    lists: getLists(),
+    lastUsedListId: getLastUsedListId(),
+    availabilityCache: getAvailabilityCache(),
+    showAll: false,
+    loadingCount: 0,
+    retryCount: 0,
+    retryAttempt: 0,
+  };
+}
+
+function createEmptyAppShellState(): AppShellState {
+  return {
+    selectedServices: [],
+    lists: [],
+    availabilityCache: {},
+    showAll: false,
+    loadingCount: 0,
+    retryCount: 0,
+    retryAttempt: 0,
+  };
+}
+
+function appShellReducer(state: AppShellState, action: AppShellAction): AppShellState {
+  switch (action.type) {
+    case "hydrate":
+      return action.state;
+    case "toggleService": {
+      const selectedServices = state.selectedServices.includes(action.service)
+        ? state.selectedServices.filter((selected) => selected !== action.service)
+        : [...state.selectedServices, action.service];
+      return { ...state, selectedServices };
+    }
+    case "importList":
+      return {
+        ...state,
+        lists: [action.list, ...state.lists],
+        lastUsedListId: action.list.id,
+        showAll: false,
+      };
+    case "selectList":
+      return { ...state, lastUsedListId: action.listId };
+    case "deleteList": {
+      const deletedIndex = state.lists.findIndex((list) => list.id === action.listId);
+      if (deletedIndex === -1) {
+        return state;
+      }
+
+      const lists = state.lists.filter((list) => list.id !== action.listId);
+      if (action.activeList?.id !== action.listId) {
+        return { ...state, lists };
+      }
+
+      const nextActiveList = lists[deletedIndex] ?? lists[deletedIndex - 1];
+      return {
+        ...state,
+        lists,
+        lastUsedListId: nextActiveList?.id,
+        showAll: false,
+      };
+    }
+    case "setShowAll":
+      return { ...state, showAll: action.showAll };
+    case "setLoadingCount":
+      return state.loadingCount === action.loadingCount
+        ? state
+        : { ...state, loadingCount: action.loadingCount };
+    case "setRetryCount":
+      return state.retryCount === action.retryCount
+        ? state
+        : { ...state, retryCount: action.retryCount };
+    case "setRetryAttempt":
+      return state.retryAttempt === action.retryAttempt
+        ? state
+        : { ...state, retryAttempt: action.retryAttempt };
+    case "setAvailabilityBatch": {
+      const availabilityCache = { ...state.availabilityCache };
+      for (const { movieKey, availability } of action.updates) {
+        availabilityCache[movieKey] = availability;
+      }
+      return { ...state, availabilityCache };
+    }
+    default:
+      return state;
+  }
 }

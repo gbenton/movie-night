@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isAvailabilityFresh } from "./cache";
+import { isAvailabilityFresh, isAvailabilityTrusted } from "./cache";
 
 test("isAvailabilityFresh returns true for a recent entry", () => {
   assert.equal(
@@ -85,6 +85,31 @@ test("isAvailabilityFresh gives low-confidence fallback results a retry cooldown
 test("isAvailabilityFresh returns true for confident unavailable JustWatch matches", () => {
   assert.equal(
     isAvailabilityFresh({
+      movieId: "heat",
+      title: "Heat",
+      services: [],
+      justWatchUrl: "https://www.justwatch.com/us/movie/heat",
+      matchConfidence: "high",
+      lastCheckedAt: new Date().toISOString(),
+      status: "unavailable",
+    }),
+    true,
+  );
+});
+
+test("isAvailabilityTrusted keeps retry decisions separate from the reload cooldown", () => {
+  assert.equal(
+    isAvailabilityTrusted({
+      movieId: "heat",
+      title: "Heat",
+      services: [],
+      lastCheckedAt: new Date().toISOString(),
+      status: "unknown",
+    }),
+    false,
+  );
+  assert.equal(
+    isAvailabilityTrusted({
       movieId: "heat",
       title: "Heat",
       services: [],
