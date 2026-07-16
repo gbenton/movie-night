@@ -6,6 +6,7 @@ import { ListPicker } from "./ListPicker";
 import { MovieListView } from "./MovieListView";
 import { ServiceSelector } from "./ServiceSelector";
 import { AVAILABILITY_LOOKUP_MAX_ATTEMPTS, useAvailabilityLookupQueue } from "./useAvailabilityLookupQueue";
+import { createBatcher, type Batcher } from "../lib/availability/batcher";
 import { filterMovies } from "../lib/filterMovies";
 import {
   getAvailabilityCache,
@@ -21,6 +22,7 @@ import {
 import type { AvailabilityResult, MovieList, StreamingService } from "../lib/types";
 
 const AVAILABILITY_CACHE_WRITE_DEBOUNCE_MS = 2_000;
+const AVAILABILITY_UI_BATCH_MS = 120;
 
 interface AppShellState {
   selectedServices: StreamingService[];
@@ -33,7 +35,13 @@ interface AppShellState {
   retryAttempt: number;
 }
 
+interface QueuedAvailabilityUpdate {
+  movieKey: string;
+  availability: AvailabilityResult;
+}
+
 type AppShellAction =
+  | { type: "hydrate"; state: AppShellState }
   | { type: "toggleService"; service: StreamingService }
   | { type: "importList"; list: MovieList }
   | { type: "selectList"; listId: string }
@@ -42,13 +50,31 @@ type AppShellAction =
   | { type: "setLoadingCount"; loadingCount: number }
   | { type: "setRetryCount"; retryCount: number }
   | { type: "setRetryAttempt"; retryAttempt: number }
-  | { type: "setAvailability"; movieKey: string; availability: AvailabilityResult };
+  | { type: "setAvailabilityBatch"; updates: QueuedAvailabilityUpdate[] };
 
 export function AppShell() {
-  const [state, dispatch] = useReducer(appShellReducer, undefined, createInitialAppShellState);
+  const [state, dispatch] = useReducer(appShellReducer, undefined, createEmptyAppShellState);
   const skipNextAvailabilityCacheWriteRef = useRef(true);
-  const availabilityCacheRef = useRef<Record<string, AvailabilityResult>>({});
+  const availabilityCacheRef = useRef<Record<string, AvailabilityResult>>(state.availabilityCache);
   const availabilityCacheWriteTimeoutRef = useRef<number | undefined>(undefined);
+  const availabilityBatcherRef = useRef<Batcher<QueuedAvailabilityUpdate> | undefined>(undefined);
+
+  if (!availabilityBatcherRef.current) {
+    availabilityBatcherRef.current = createBatcher((updates) => {
+      const nextAvailabilityCache = { ...availabilityCacheRef.current };
+      for (const { movieKey, availability } of updates) {
+        nextAvailabilityCache[movieKey] = availability;
+      }
+      availabilityCacheRef.current = nextAvailabilityCache;
+      dispatch({ type: "setAvailabilityBatch", updates });
+    }, AVAILABILITY_UI_BATCH_MS);
+  }
+
+  useEffect(() => {
+    const hydratedState = createInitialAppShellState();
+    availabilityCacheRef.current = hydratedState.availabilityCache;
+    dispatch({ type: "hydrate", state: hydratedState });
+  }, []);
 
   useEffect(() => {
     availabilityCacheRef.current = state.availabilityCache;
@@ -60,7 +86,7 @@ export function AppShell() {
   );
 
   const handleAvailability = useCallback((movieKey: string, availability: AvailabilityResult) => {
-    dispatch({ type: "setAvailability", movieKey, availability });
+    availabilityBatcherRef.current?.add({ movieKey, availability });
   }, []);
   const handleLoadingCountChange = useCallback((loadingCount: number) => {
     dispatch({ type: "setLoadingCount", loadingCount });
@@ -106,6 +132,7 @@ export function AppShell() {
 
   useEffect(() => {
     function flushAvailabilityCache() {
+      availabilityBatcherRef.current?.flush();
       if (availabilityCacheWriteTimeoutRef.current) {
         window.clearTimeout(availabilityCacheWriteTimeoutRef.current);
         availabilityCacheWriteTimeoutRef.current = undefined;
@@ -126,6 +153,7 @@ export function AppShell() {
     return () => {
       window.removeEventListener("pagehide", flushAvailabilityCache);
       document.removeEventListener("visibilitychange", flushWhenHidden);
+      availabilityBatcherRef.current?.cancel();
     };
   }, []);
 
@@ -135,8 +163,9 @@ export function AppShell() {
       selectedServices: state.selectedServices,
       availabilityByMovieKey: state.availabilityCache,
       showAll: state.showAll,
+      includePending: state.loadingCount > 0 || state.retryCount > 0,
     }),
-    [activeList, state.availabilityCache, state.selectedServices, state.showAll],
+    [activeList, state.availabilityCache, state.loadingCount, state.retryCount, state.selectedServices, state.showAll],
   );
 
   function handleToggleService(service: StreamingService) {
@@ -224,8 +253,22 @@ function createInitialAppShellState(): AppShellState {
   };
 }
 
+function createEmptyAppShellState(): AppShellState {
+  return {
+    selectedServices: [],
+    lists: [],
+    availabilityCache: {},
+    showAll: false,
+    loadingCount: 0,
+    retryCount: 0,
+    retryAttempt: 0,
+  };
+}
+
 function appShellReducer(state: AppShellState, action: AppShellAction): AppShellState {
   switch (action.type) {
+    case "hydrate":
+      return action.state;
     case "toggleService": {
       const selectedServices = state.selectedServices.includes(action.service)
         ? state.selectedServices.filter((selected) => selected !== action.service)
@@ -274,14 +317,13 @@ function appShellReducer(state: AppShellState, action: AppShellAction): AppShell
       return state.retryAttempt === action.retryAttempt
         ? state
         : { ...state, retryAttempt: action.retryAttempt };
-    case "setAvailability":
-      return {
-        ...state,
-        availabilityCache: {
-          ...state.availabilityCache,
-          [action.movieKey]: action.availability,
-        },
-      };
+    case "setAvailabilityBatch": {
+      const availabilityCache = { ...state.availabilityCache };
+      for (const { movieKey, availability } of action.updates) {
+        availabilityCache[movieKey] = availability;
+      }
+      return { ...state, availabilityCache };
+    }
     default:
       return state;
   }

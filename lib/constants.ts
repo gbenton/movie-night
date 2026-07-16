@@ -21,3 +21,4 @@ export const STORAGE_KEYS = {
 } as const;
 
 export const AVAILABILITY_TTL_MS = 24 * 60 * 60 * 1000;
+export const AVAILABILITY_RETRY_TTL_MS = 15 * 60 * 1000;

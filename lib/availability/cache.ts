@@ -1,20 +1,8 @@
-import { AVAILABILITY_TTL_MS } from "../constants";
+import { AVAILABILITY_RETRY_TTL_MS, AVAILABILITY_TTL_MS } from "../constants";
 import type { AvailabilityResult } from "../types";
 
 export function isAvailabilityFresh(entry?: AvailabilityResult): boolean {
   if (!entry) {
-    return false;
-  }
-
-  if (entry.status === "unknown") {
-    return false;
-  }
-
-  if (entry.status === "unavailable" && entry.services.length === 0 && !entry.justWatchUrl && !entry.providerLinks) {
-    return false;
-  }
-
-  if (entry.status === "unavailable" && entry.services.length === 0 && entry.matchConfidence === "low") {
     return false;
   }
 
@@ -23,5 +11,22 @@ export function isAvailabilityFresh(entry?: AvailabilityResult): boolean {
     return false;
   }
 
-  return Date.now() - checkedAt < AVAILABILITY_TTL_MS;
+  const ttl = isAvailabilityTrusted(entry) ? AVAILABILITY_TTL_MS : AVAILABILITY_RETRY_TTL_MS;
+  return Date.now() - checkedAt < ttl;
+}
+
+export function isAvailabilityTrusted(entry?: AvailabilityResult): boolean {
+  if (!entry || entry.status === "unknown") {
+    return false;
+  }
+
+  if (entry.status !== "unavailable" || entry.services.length > 0) {
+    return true;
+  }
+
+  if (!entry.justWatchUrl && !entry.providerLinks) {
+    return false;
+  }
+
+  return entry.matchConfidence !== "low";
 }

@@ -1,13 +1,13 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { isAvailabilityFresh } from "../lib/availability/cache";
+import { isAvailabilityFresh, isAvailabilityTrusted } from "../lib/availability/cache";
 import { createMovieId } from "../lib/normalize";
 import { createTimeoutSignal } from "../lib/timeoutSignal";
 import type { AvailabilityResult, MovieItem, MovieList } from "../lib/types";
 
-const AVAILABILITY_FIRST_PASS_CONCURRENCY = 2;
-const AVAILABILITY_FIRST_PASS_START_SPACING_MS = 1_250;
+const AVAILABILITY_FIRST_PASS_CONCURRENCY = 8;
+const AVAILABILITY_FIRST_PASS_START_SPACING_MS = 0;
 const AVAILABILITY_RETRY_CONCURRENCY = 1;
 const AVAILABILITY_RETRY_START_SPACING_MS = 2_500;
 const AVAILABILITY_CLIENT_TIMEOUT_MS = 20_000;
@@ -152,7 +152,7 @@ function runLookupQueue({
         }
 
         const update = await fetchAvailability(movie);
-        const trusted = isAvailabilityFresh(update);
+        const trusted = isAvailabilityTrusted(update);
         const exhausted = attempt >= AVAILABILITY_LOOKUP_MAX_ATTEMPTS;
         if (trusted || exhausted) {
           onAvailability(key, update);

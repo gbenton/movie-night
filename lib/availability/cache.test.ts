@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isAvailabilityFresh } from "./cache";
+import { isAvailabilityFresh, isAvailabilityTrusted } from "./cache";
 
 test("isAvailabilityFresh returns true for a recent entry", () => {
   assert.equal(
@@ -28,7 +28,7 @@ test("isAvailabilityFresh returns false for a stale entry", () => {
   );
 });
 
-test("isAvailabilityFresh returns false for unknown entries", () => {
+test("isAvailabilityFresh gives recent unknown entries a retry cooldown", () => {
   assert.equal(
     isAvailabilityFresh({
       movieId: "heat",
@@ -37,11 +37,24 @@ test("isAvailabilityFresh returns false for unknown entries", () => {
       lastCheckedAt: new Date().toISOString(),
       status: "unknown",
     }),
+    true,
+  );
+});
+
+test("isAvailabilityFresh retries unknown entries after the cooldown", () => {
+  assert.equal(
+    isAvailabilityFresh({
+      movieId: "heat",
+      title: "Heat",
+      services: [],
+      lastCheckedAt: new Date(Date.now() - 16 * 60 * 1000).toISOString(),
+      status: "unknown",
+    }),
     false,
   );
 });
 
-test("isAvailabilityFresh returns false for failed empty unavailable entries", () => {
+test("isAvailabilityFresh gives recent empty unavailable entries a retry cooldown", () => {
   assert.equal(
     isAvailabilityFresh({
       movieId: "heat",
@@ -50,11 +63,11 @@ test("isAvailabilityFresh returns false for failed empty unavailable entries", (
       lastCheckedAt: new Date().toISOString(),
       status: "unavailable",
     }),
-    false,
+    true,
   );
 });
 
-test("isAvailabilityFresh returns false for low-confidence unavailable fallback results", () => {
+test("isAvailabilityFresh gives low-confidence fallback results a retry cooldown", () => {
   assert.equal(
     isAvailabilityFresh({
       movieId: "heat",
@@ -65,13 +78,38 @@ test("isAvailabilityFresh returns false for low-confidence unavailable fallback 
       lastCheckedAt: new Date().toISOString(),
       status: "unavailable",
     }),
-    false,
+    true,
   );
 });
 
 test("isAvailabilityFresh returns true for confident unavailable JustWatch matches", () => {
   assert.equal(
     isAvailabilityFresh({
+      movieId: "heat",
+      title: "Heat",
+      services: [],
+      justWatchUrl: "https://www.justwatch.com/us/movie/heat",
+      matchConfidence: "high",
+      lastCheckedAt: new Date().toISOString(),
+      status: "unavailable",
+    }),
+    true,
+  );
+});
+
+test("isAvailabilityTrusted keeps retry decisions separate from the reload cooldown", () => {
+  assert.equal(
+    isAvailabilityTrusted({
+      movieId: "heat",
+      title: "Heat",
+      services: [],
+      lastCheckedAt: new Date().toISOString(),
+      status: "unknown",
+    }),
+    false,
+  );
+  assert.equal(
+    isAvailabilityTrusted({
       movieId: "heat",
       title: "Heat",
       services: [],
