@@ -54,3 +54,15 @@ test("filterMovies preserves source order when showAll is enabled", () => {
 
   assert.deepEqual(results.map((movie) => movie.title), ["Heat", "Zodiac"]);
 });
+
+test("filterMovies can surface unchecked titles while a large list loads", () => {
+  const results = filterMovies({
+    list,
+    selectedServices: ["Netflix"],
+    showAll: false,
+    includePending: true,
+    availabilityByMovieKey: {},
+  });
+
+  assert.deepEqual(results.map((movie) => movie.title), ["Heat", "Zodiac"]);
+});

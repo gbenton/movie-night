@@ -1,3 +1,6 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
 import { MovieRow } from "./MovieRow";
 import { ShowAllToggle } from "./ShowAllToggle";
 import type { DisplayMovie, MovieList, StreamingService } from "../lib/types";
@@ -9,7 +12,10 @@ interface MovieListViewProps {
   showAll: boolean;
   onToggleShowAll: (nextValue: boolean) => void;
   loadingCount: number;
+  loadingTotal: number;
 }
+
+const MOVIES_PER_PAGE = 24;
 
 export function MovieListView({
   list,
@@ -18,9 +24,20 @@ export function MovieListView({
   showAll,
   onToggleShowAll,
   loadingCount,
+  loadingTotal,
 }: MovieListViewProps) {
+  const [visibleLimit, setVisibleLimit] = useState(MOVIES_PER_PAGE);
+  const serviceKey = selectedServices.join("|");
+
+  useEffect(() => {
+    setVisibleLimit(MOVIES_PER_PAGE);
+  }, [list?.id, serviceKey, showAll]);
+
+  const displayedMovies = useMemo(() => movies.slice(0, visibleLimit), [movies, visibleLimit]);
+  const checkedCount = Math.max(loadingTotal - loadingCount, 0);
+
   return (
-    <section className="panel list-panel">
+    <section className="panel list-panel" data-testid="movie-list-panel">
       <div className="section-heading list-heading">
         <div>
           <p className="eyebrow">Now watching</p>
@@ -30,11 +47,24 @@ export function MovieListView({
           <ShowAllToggle checked={showAll} onChange={onToggleShowAll} />
         </div>
       </div>
-      {loadingCount > 0 ? <p className="helper-text">Checking availability for {loadingCount} title(s)…</p> : null}
+      {loadingCount > 0 ? (
+        <div className="lookup-progress" role="status" aria-live="polite" data-testid="lookup-progress">
+          <div className="progress-copy">
+            <strong>Checking {checkedCount} of {loadingTotal}</strong>
+            <span>Results are ready to use as they arrive.</span>
+          </div>
+          <progress max={loadingTotal} value={checkedCount} aria-label={`Checked ${checkedCount} of ${loadingTotal} titles`} />
+        </div>
+      ) : null}
       {!list ? (
         <div className="empty-state">
           <h3>No lists yet</h3>
           <p>Import a trusted list to start filtering by what you can stream right now.</p>
+        </div>
+      ) : movies.length === 0 && loadingCount > 0 ? (
+        <div className="empty-state">
+          <h3>Finding matches…</h3>
+          <p>The first results will appear here as soon as they are ready.</p>
         </div>
       ) : movies.length === 0 ? (
         <div className="empty-state">
@@ -46,11 +76,26 @@ export function MovieListView({
           </p>
         </div>
       ) : (
-        <div className="movie-list">
-          {movies.map((movie) => (
-            <MovieRow key={movie.id} movie={movie} selectedServices={selectedServices} />
-          ))}
-        </div>
+        <>
+          <div className="results-summary" data-testid="results-summary">
+            <span>Showing {displayedMovies.length} of {movies.length}</span>
+            {loadingCount > 0 ? <span>{loadingCount} still checking</span> : null}
+          </div>
+          <div className="movie-list" data-testid="movie-list">
+            {displayedMovies.map((movie) => (
+              <MovieRow key={movie.id} movie={movie} selectedServices={selectedServices} />
+            ))}
+          </div>
+          {displayedMovies.length < movies.length ? (
+            <button
+              className="secondary-button load-more-button"
+              type="button"
+              onClick={() => setVisibleLimit((current) => current + MOVIES_PER_PAGE)}
+            >
+              Show {Math.min(MOVIES_PER_PAGE, movies.length - displayedMovies.length)} more
+            </button>
+          ) : null}
+        </>
       )}
     </section>
   );

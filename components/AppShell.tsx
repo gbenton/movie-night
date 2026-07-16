@@ -5,7 +5,9 @@ import { ImportPanel } from "./ImportPanel";
 import { ListPicker } from "./ListPicker";
 import { MovieListView } from "./MovieListView";
 import { ServiceSelector } from "./ServiceSelector";
+import { createBatcher, type Batcher } from "../lib/availability/batcher";
 import { isAvailabilityFresh } from "../lib/availability/cache";
+import { runWithConcurrency } from "../lib/availability/lookupQueue";
 import { filterMovies } from "../lib/filterMovies";
 import { createMovieId } from "../lib/normalize";
 import {
@@ -21,8 +23,20 @@ import {
 } from "../lib/storage";
 import type { AvailabilityResult, MovieItem, MovieList, StreamingService } from "../lib/types";
 
-const AVAILABILITY_LOOKUP_CONCURRENCY = 4;
+const AVAILABILITY_LOOKUP_CONCURRENCY = 8;
 const AVAILABILITY_CLIENT_TIMEOUT_MS = 8_000;
+const AVAILABILITY_UI_BATCH_MS = 120;
+const AVAILABILITY_CACHE_WRITE_MS = 750;
+
+interface LookupProgress {
+  total: number;
+  remaining: number;
+}
+
+interface QueuedAvailabilityUpdate {
+  key: string;
+  value: AvailabilityResult;
+}
 
 export function AppShell() {
   const [selectedServices, setSelectedServicesState] = useState<StreamingService[]>([]);
@@ -30,16 +44,48 @@ export function AppShell() {
   const [lastUsedListId, setLastUsedListIdState] = useState<string>();
   const [availabilityCache, setAvailabilityCacheState] = useState<Record<string, AvailabilityResult>>({});
   const [showAll, setShowAll] = useState(false);
-  const [loadingCount, setLoadingCount] = useState(0);
+  const [lookupProgress, setLookupProgress] = useState<LookupProgress>({ total: 0, remaining: 0 });
   const lookupRunIdRef = useRef(0);
   const inFlightAvailabilityKeysRef = useRef(new Set<string>());
-  const skipNextAvailabilityCacheWriteRef = useRef(true);
+  const availabilityCacheRef = useRef<Record<string, AvailabilityResult>>({});
+  const lookupProgressRef = useRef<LookupProgress>({ total: 0, remaining: 0 });
+  const cacheWriteTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const availabilityBatcherRef = useRef<Batcher<QueuedAvailabilityUpdate> | undefined>(undefined);
+
+  if (!availabilityBatcherRef.current) {
+    availabilityBatcherRef.current = createBatcher((updates) => {
+      const mergedUpdates = Object.fromEntries(updates.map(({ key, value }) => [key, value]));
+      const nextCache = { ...availabilityCacheRef.current, ...mergedUpdates };
+      availabilityCacheRef.current = nextCache;
+      setAvailabilityCacheState(nextCache);
+      setLookupProgress({ ...lookupProgressRef.current });
+      scheduleAvailabilityCacheWrite();
+    }, AVAILABILITY_UI_BATCH_MS);
+  }
 
   useEffect(() => {
     setSelectedServicesState(getSelectedServices());
     setListsState(getLists());
     setLastUsedListIdState(getLastUsedListId());
-    setAvailabilityCacheState(getAvailabilityCache());
+    const storedAvailability = getAvailabilityCache();
+    availabilityCacheRef.current = storedAvailability;
+    setAvailabilityCacheState(storedAvailability);
+  }, []);
+
+  useEffect(() => {
+    function persistBeforeLeaving() {
+      availabilityBatcherRef.current?.flush();
+      setAvailabilityCache(availabilityCacheRef.current);
+    }
+
+    window.addEventListener("pagehide", persistBeforeLeaving);
+    return () => {
+      window.removeEventListener("pagehide", persistBeforeLeaving);
+      availabilityBatcherRef.current?.cancel();
+      if (cacheWriteTimerRef.current) {
+        clearTimeout(cacheWriteTimerRef.current);
+      }
+    };
   }, []);
 
   const activeList = useMemo(
@@ -50,7 +96,8 @@ export function AppShell() {
   useEffect(() => {
     if (!activeList) {
       lookupRunIdRef.current += 1;
-      setLoadingCount(0);
+      lookupProgressRef.current = { total: 0, remaining: 0 };
+      setLookupProgress(lookupProgressRef.current);
       return;
     }
 
@@ -63,19 +110,21 @@ export function AppShell() {
   useEffect(() => {
     if (!activeList) {
       lookupRunIdRef.current += 1;
-      setLoadingCount(0);
+      lookupProgressRef.current = { total: 0, remaining: 0 };
+      setLookupProgress(lookupProgressRef.current);
       return;
     }
 
     const runId = lookupRunIdRef.current + 1;
     lookupRunIdRef.current = runId;
+    const inFlightAvailabilityKeys = inFlightAvailabilityKeysRef.current;
 
     const staleMovieByKey = new Map<string, MovieItem>();
     for (const movie of activeList.movies) {
       const key = createMovieId(movie.title, movie.year);
-      const availability = availabilityCache[key];
+      const availability = availabilityCacheRef.current[key];
       if (
-        !inFlightAvailabilityKeysRef.current.has(key) &&
+        !inFlightAvailabilityKeys.has(key) &&
         !isAvailabilityFresh(availability)
       ) {
         staleMovieByKey.set(key, movie);
@@ -84,27 +133,32 @@ export function AppShell() {
 
     const staleMovies = Array.from(staleMovieByKey.values());
     if (staleMovies.length === 0) {
-      setLoadingCount(0);
+      lookupProgressRef.current = { total: 0, remaining: 0 };
+      setLookupProgress(lookupProgressRef.current);
       return;
     }
 
-    let cancelled = false;
-    setLoadingCount(staleMovies.length);
+    const controller = new AbortController();
+    lookupProgressRef.current = { total: staleMovies.length, remaining: staleMovies.length };
+    setLookupProgress(lookupProgressRef.current);
 
-    (async () => {
-      let nextMovieIndex = 0;
-
-      async function lookupMovie(movie: MovieItem) {
+    void runWithConcurrency(
+      staleMovies,
+      AVAILABILITY_LOOKUP_CONCURRENCY,
+      async (movie: MovieItem) => {
         const key = createMovieId(movie.title, movie.year);
-        inFlightAvailabilityKeysRef.current.add(key);
-        let update: AvailabilityResult;
+        inFlightAvailabilityKeys.add(key);
+        let update: AvailabilityResult | undefined;
 
         try {
           const response = await fetch(`/api/availability/${encodeURIComponent(movie.id)}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ title: movie.title, year: movie.year }),
-            signal: AbortSignal.timeout(AVAILABILITY_CLIENT_TIMEOUT_MS),
+            signal: AbortSignal.any([
+              controller.signal,
+              AbortSignal.timeout(AVAILABILITY_CLIENT_TIMEOUT_MS),
+            ]),
           });
 
           if (!response.ok) {
@@ -113,69 +167,61 @@ export function AppShell() {
 
           update = (await response.json()) as AvailabilityResult;
         } catch {
-          update = {
-            movieId: movie.id,
-            title: movie.title,
-            year: movie.year,
-            services: [],
-            lastCheckedAt: new Date().toISOString(),
-            status: "unknown",
-            matchConfidence: "low",
-          };
+          if (!controller.signal.aborted) {
+            update = {
+              movieId: movie.id,
+              title: movie.title,
+              year: movie.year,
+              services: [],
+              lastCheckedAt: new Date().toISOString(),
+              status: "unknown",
+              matchConfidence: "low",
+            };
+          }
         } finally {
-          inFlightAvailabilityKeysRef.current.delete(key);
+          inFlightAvailabilityKeys.delete(key);
 
-          setAvailabilityCacheState((current) => {
-            const next = { ...current, [key]: update };
-            return next;
-          });
-
-          if (!cancelled && lookupRunIdRef.current === runId) {
-            setLoadingCount((current) => Math.max(current - 1, 0));
+          if (update) {
+            if (!controller.signal.aborted && lookupRunIdRef.current === runId) {
+              lookupProgressRef.current = {
+                ...lookupProgressRef.current,
+                remaining: Math.max(lookupProgressRef.current.remaining - 1, 0),
+              };
+            }
+            availabilityBatcherRef.current?.add({ key, value: update });
           }
         }
-      }
-
-      async function lookupNextMovie() {
-        while (!cancelled) {
-          const movie = staleMovies[nextMovieIndex];
-          nextMovieIndex += 1;
-
-          if (!movie) {
-            return;
-          }
-
-          await lookupMovie(movie);
-        }
-      }
-
-      await Promise.all(
-        Array.from({ length: Math.min(AVAILABILITY_LOOKUP_CONCURRENCY, staleMovies.length) }, () => lookupNextMovie()),
-      );
-
-      if (cancelled) {
-        return;
-      }
-    })();
+      },
+      controller.signal,
+    );
 
     return () => {
-      cancelled = true;
+      controller.abort();
+      inFlightAvailabilityKeys.clear();
     };
   }, [activeList]);
 
-  useEffect(() => {
-    if (skipNextAvailabilityCacheWriteRef.current) {
-      skipNextAvailabilityCacheWriteRef.current = false;
+  const visibleMovies = useMemo(
+    () => filterMovies({
+      list: activeList,
+      selectedServices,
+      availabilityByMovieKey: availabilityCache,
+      showAll,
+      includePending: lookupProgress.remaining > 0,
+    }),
+    [activeList, availabilityCache, lookupProgress.remaining, selectedServices, showAll],
+  );
+
+  function scheduleAvailabilityCacheWrite() {
+    if (cacheWriteTimerRef.current) {
       return;
     }
 
-    setAvailabilityCache(availabilityCache);
-  }, [availabilityCache]);
-
-  const visibleMovies = useMemo(
-    () => filterMovies({ list: activeList, selectedServices, availabilityByMovieKey: availabilityCache, showAll }),
-    [activeList, availabilityCache, selectedServices, showAll],
-  );
+    cacheWriteTimerRef.current = setTimeout(() => {
+      cacheWriteTimerRef.current = undefined;
+      setAvailabilityCache(availabilityCacheRef.current);
+    }, AVAILABILITY_CACHE_WRITE_MS);
+  }
 
   function handleToggleService(service: StreamingService) {
     const next = selectedServices.includes(service)
@@ -243,7 +289,8 @@ export function AppShell() {
           selectedServices={selectedServices}
           showAll={showAll}
           onToggleShowAll={setShowAll}
-          loadingCount={loadingCount}
+          loadingCount={lookupProgress.remaining}
+          loadingTotal={lookupProgress.total}
         />
       </div>
     </main>

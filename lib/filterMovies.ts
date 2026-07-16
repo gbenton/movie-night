@@ -6,9 +6,10 @@ interface FilterOptions {
   selectedServices: StreamingService[];
   availabilityByMovieKey: Record<string, AvailabilityResult>;
   showAll: boolean;
+  includePending?: boolean;
 }
 
-export function filterMovies({ list, selectedServices, availabilityByMovieKey, showAll }: FilterOptions): DisplayMovie[] {
+export function filterMovies({ list, selectedServices, availabilityByMovieKey, showAll, includePending = false }: FilterOptions): DisplayMovie[] {
   if (!list) {
     return [];
   }
@@ -28,7 +29,7 @@ export function filterMovies({ list, selectedServices, availabilityByMovieKey, s
 
       const availability = movie.availability;
       if (!availability) {
-        return false;
+        return includePending;
       }
 
       if (availability.status !== "available") {

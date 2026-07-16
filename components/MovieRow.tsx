@@ -1,3 +1,4 @@
+import { memo } from "react";
 import type { DisplayMovie, StreamingService } from "../lib/types";
 import { selectProviderLink } from "../lib/providerLinks";
 
@@ -6,7 +7,7 @@ interface MovieRowProps {
   selectedServices: StreamingService[];
 }
 
-export function MovieRow({ movie, selectedServices }: MovieRowProps) {
+export const MovieRow = memo(function MovieRow({ movie, selectedServices }: MovieRowProps) {
   const availability = movie.availability;
   const serviceSet = selectedServices.length > 0 ? selectedServices : availability?.services ?? [];
   const matchedServices = availability?.services.filter((service) => serviceSet.includes(service)) ?? [];
@@ -17,7 +18,7 @@ export function MovieRow({ movie, selectedServices }: MovieRowProps) {
   const emptyServiceLabel = getEmptyServiceLabel(availability);
 
   return (
-    <article className={`movie-row ${unavailable ? "muted" : ""}`}>
+    <article className={`movie-row ${unavailable ? "muted" : ""}`} data-movie-id={movie.id}>
       <div className="movie-copy">
         <div className="title-row">
           {typeof movie.rank === "number" ? <span className="rank-badge">#{movie.rank}</span> : null}
@@ -45,7 +46,11 @@ export function MovieRow({ movie, selectedServices }: MovieRowProps) {
       ) : null}
     </article>
   );
-}
+}, (previous, next) => (
+  previous.movie.id === next.movie.id
+  && previous.movie.availability === next.movie.availability
+  && previous.selectedServices === next.selectedServices
+));
 
 function getEmptyServiceLabel(availability: DisplayMovie["availability"]): string {
   if (!availability || (availability.status === "unavailable" && !availability.justWatchUrl && !availability.providerLinks)) {
