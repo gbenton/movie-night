@@ -9,6 +9,7 @@ import { AVAILABILITY_LOOKUP_MAX_ATTEMPTS, useAvailabilityLookupQueue } from "./
 import { createBatcher, type Batcher } from "../lib/availability/batcher";
 import { shouldReplaceAvailability } from "../lib/availability/cache";
 import { filterMovies } from "../lib/filterMovies";
+import { createMovieId } from "../lib/normalize";
 import {
   getAvailabilityCache,
   getLastUsedListId,
@@ -169,6 +170,11 @@ export function AppShell() {
     }),
     [activeList, state.availabilityCache, state.selectedServices, state.showAll],
   );
+  const rateLimitedCount = useMemo(
+    () => activeList?.movies.reduce((count, movie) =>
+      count + (state.availabilityCache[createMovieId(movie.title, movie.year)]?.failureReason === "rate_limited" ? 1 : 0), 0) ?? 0,
+    [activeList, state.availabilityCache],
+  );
 
   function handleToggleService(service: StreamingService) {
     const next = state.selectedServices.includes(service)
@@ -236,6 +242,7 @@ export function AppShell() {
           retryCount={state.retryCount}
           retryAttempt={state.retryAttempt}
           retryAttemptLimit={AVAILABILITY_LOOKUP_MAX_ATTEMPTS}
+          rateLimitedCount={rateLimitedCount}
         />
       </div>
     </main>

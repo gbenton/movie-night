@@ -16,6 +16,7 @@ interface MovieListViewProps {
   retryCount: number;
   retryAttempt: number;
   retryAttemptLimit: number;
+  rateLimitedCount: number;
 }
 
 export function MovieListView({
@@ -28,6 +29,7 @@ export function MovieListView({
   retryCount,
   retryAttempt,
   retryAttemptLimit,
+  rateLimitedCount,
 }: MovieListViewProps) {
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query);
@@ -54,6 +56,7 @@ export function MovieListView({
     retryCount,
     retryAttempt,
     retryAttemptLimit,
+    rateLimitedCount,
   );
   const isChecking = loadingCount > 0 || retryCount > 0;
 
@@ -145,6 +148,7 @@ function getAvailabilityStatus(
   retryCount: number,
   retryAttempt: number,
   retryAttemptLimit: number,
+  rateLimitedCount: number,
 ): string | undefined {
   if (loadingCount > 0) {
     if (retryCount > 0) {
@@ -163,6 +167,9 @@ function getAvailabilityStatus(
   }
 
   if (movieCount > 0) {
+    if (rateLimitedCount > 0) {
+      return `Availability checked; ${rateLimitedCount} title(s) were rate-limited. Try again later for those titles.`;
+    }
     return "Availability complete.";
   }
 
