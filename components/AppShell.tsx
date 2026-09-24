@@ -7,6 +7,7 @@ import { MovieListView } from "./MovieListView";
 import { ServiceSelector } from "./ServiceSelector";
 import { AVAILABILITY_LOOKUP_MAX_ATTEMPTS, useAvailabilityLookupQueue } from "./useAvailabilityLookupQueue";
 import { createBatcher, type Batcher } from "../lib/availability/batcher";
+import { shouldReplaceAvailability } from "../lib/availability/cache";
 import { filterMovies } from "../lib/filterMovies";
 import {
   getAvailabilityCache,
@@ -63,7 +64,9 @@ export function AppShell() {
     availabilityBatcherRef.current = createBatcher((updates) => {
       const nextAvailabilityCache = { ...availabilityCacheRef.current };
       for (const { movieKey, availability } of updates) {
-        nextAvailabilityCache[movieKey] = availability;
+        if (shouldReplaceAvailability(nextAvailabilityCache[movieKey], availability)) {
+          nextAvailabilityCache[movieKey] = availability;
+        }
       }
       availabilityCacheRef.current = nextAvailabilityCache;
       dispatch({ type: "setAvailabilityBatch", updates });
@@ -319,7 +322,9 @@ function appShellReducer(state: AppShellState, action: AppShellAction): AppShell
     case "setAvailabilityBatch": {
       const availabilityCache = { ...state.availabilityCache };
       for (const { movieKey, availability } of action.updates) {
-        availabilityCache[movieKey] = availability;
+        if (shouldReplaceAvailability(availabilityCache[movieKey], availability)) {
+          availabilityCache[movieKey] = availability;
+        }
       }
       return { ...state, availabilityCache };
     }

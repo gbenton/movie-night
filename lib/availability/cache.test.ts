@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isAvailabilityFresh, isAvailabilityTrusted } from "./cache";
+import type { AvailabilityResult } from "../types";
+import { isAvailabilityFresh, isAvailabilityTrusted, shouldReplaceAvailability, shouldRetryAvailabilityNow } from "./cache";
 
 test("isAvailabilityFresh returns true for a recent entry", () => {
   assert.equal(
@@ -120,4 +121,34 @@ test("isAvailabilityTrusted keeps retry decisions separate from the reload coold
     }),
     true,
   );
+});
+
+test("only transient unknowns get an immediate retry", () => {
+  const result: AvailabilityResult = {
+    movieId: "heat",
+    title: "Heat",
+    services: [],
+    lastCheckedAt: new Date().toISOString(),
+    status: "unknown",
+  };
+
+  assert.equal(shouldRetryAvailabilityNow({ ...result, status: "unknown", failureReason: "lookup_failed" }), true);
+  assert.equal(shouldRetryAvailabilityNow({ ...result, status: "unknown", failureReason: "rate_limited" }), true);
+  assert.equal(shouldRetryAvailabilityNow({ ...result, status: "unavailable", matchConfidence: "low" }), false);
+  assert.equal(shouldRetryAvailabilityNow({ ...result, status: "available", services: ["Netflix"] }), false);
+});
+
+test("a transient failure cannot replace a confirmed cached match", () => {
+  const known: AvailabilityResult = {
+    movieId: "heat",
+    title: "Heat",
+    services: ["Netflix"],
+    lastCheckedAt: new Date().toISOString(),
+    status: "available",
+  };
+  const unknown: AvailabilityResult = { ...known, services: [], status: "unknown", failureReason: "rate_limited" };
+
+  assert.equal(shouldReplaceAvailability(known, unknown), false);
+  assert.equal(shouldReplaceAvailability(undefined, unknown), true);
+  assert.equal(shouldReplaceAvailability(unknown, known), true);
 });

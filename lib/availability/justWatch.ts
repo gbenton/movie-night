@@ -16,9 +16,10 @@ const STREAMING_BUSINESS_FUNCTIONS = new Set([
   "http://purl.org/goodrelations/v1#ProvideService",
 ]);
 
-export async function fetchJustWatchAvailability(movieId: string, title: string, year?: number): Promise<AvailabilityResult> {
+export async function fetchJustWatchAvailability(movieId: string, title: string, year?: number, signal?: AbortSignal): Promise<AvailabilityResult> {
   try {
-    const candidate = await fetchBestJustWatchPage(title, year);
+    signal?.throwIfAborted();
+    const candidate = await fetchBestJustWatchPage(title, year, signal);
 
     if (!candidate) {
       return buildFallbackAvailability(movieId, title, year, "unavailable");
@@ -40,7 +41,10 @@ export async function fetchJustWatchAvailability(movieId: string, title: string,
       matchConfidence: deriveConfidence(candidate.movie, title, year),
     };
   } catch (error) {
-    console.error("JustWatch lookup failed", { movieId, title, year, error });
+    signal?.throwIfAborted();
+    if (!(error instanceof JustWatchRateLimitError)) {
+      console.error("JustWatch lookup failed", { movieId, title, year, error });
+    }
     return buildFallbackAvailability(movieId, title, year, "unknown", classifyLookupFailure(error));
   }
 }
@@ -48,6 +52,7 @@ export async function fetchJustWatchAvailability(movieId: string, title: string,
 async function fetchBestJustWatchPage(
   title: string,
   year?: number,
+  signal?: AbortSignal,
 ): Promise<{ movie: JustWatchJsonLdMovie; url: string } | undefined> {
   const urls = [...buildCandidateUrls(title, year)];
   const inspectedUrls = new Set(urls);
@@ -55,7 +60,7 @@ async function fetchBestJustWatchPage(
   let bestCandidate: { movie: JustWatchJsonLdMovie; url: string; score: number } | undefined;
 
   async function inspectUrl(url: string): Promise<boolean> {
-    const response = await fetchJustWatchHtml(url);
+    const response = await fetchJustWatchHtml(url, signal);
 
     if (RETRYABLE_STATUS_CODES.has(response.status)) {
       throw buildRetryableStatusError(response, url);
@@ -86,7 +91,7 @@ async function fetchBestJustWatchPage(
   await inspectUrlsInOrder(urls, inspectUrl);
 
   if (!bestCandidate || bestCandidate.score < strongMatchScore) {
-    await inspectSearchUrlsInOrder(await fetchSearchResultUrls(title), inspectedUrls, inspectUrl);
+    await inspectSearchUrlsInOrder(await fetchSearchResultUrls(title, signal), inspectedUrls, inspectUrl);
   }
 
   return bestCandidate && bestCandidate.score >= 4
@@ -141,61 +146,62 @@ function buildCandidateUrls(title: string, year?: number): string[] {
   return Array.from(new Set(urls));
 }
 
-async function fetchSearchResultUrls(title: string): Promise<string[]> {
-  const response = await fetchJustWatchHtml(`${JUSTWATCH_SEARCH_URL}?q=${encodeURIComponent(title)}`);
+async function fetchSearchResultUrls(title: string, signal?: AbortSignal): Promise<string[]> {
+  const response = await fetchJustWatchHtml(`${JUSTWATCH_SEARCH_URL}?q=${encodeURIComponent(title)}`, signal);
+
+  if (RETRYABLE_STATUS_CODES.has(response.status)) {
+    throw buildRetryableStatusError(response, response.url);
+  }
 
   if (!response.ok) {
     return [];
   }
 
-  return extractMovieUrls(await response.text()).slice(0, 8);
+  const html = await response.text();
+  if (isLikelyBlockedHtml(html)) {
+    throw new Error("JustWatch returned a blocked search page");
+  }
+  return extractMovieUrls(html).slice(0, 8);
 }
 
-function fetchJustWatchHtml(url: string): Promise<Response> {
-  return fetchJustWatchHtmlAttempt(url, 1);
+function fetchJustWatchHtml(url: string, signal?: AbortSignal): Promise<Response> {
+  return fetchJustWatchHtmlAttempt(url, signal);
 }
 
-async function fetchJustWatchHtmlAttempt(url: string, attempt: number): Promise<Response> {
-  try {
-    const response = await fetch(url, {
-      cache: "no-store",
-      headers: {
-        Accept: "text/html,application/xhtml+xml",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Cache-Control": "no-cache",
-        Pragma: "no-cache",
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
-      },
-      next: { revalidate: 0 },
-      signal: AbortSignal.timeout(JUSTWATCH_REQUEST_TIMEOUT_MS),
-    });
+async function fetchJustWatchHtmlAttempt(url: string, signal?: AbortSignal): Promise<Response> {
+  for (let attempt = 1; attempt <= JUSTWATCH_FETCH_ATTEMPTS; attempt += 1) {
+    try {
+      signal?.throwIfAborted();
+      const response = await fetch(url, {
+        cache: "no-store",
+        headers: {
+          Accept: "text/html,application/xhtml+xml",
+          "Accept-Language": "en-US,en;q=0.9",
+          "Cache-Control": "no-cache",
+          Pragma: "no-cache",
+          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+        },
+        next: { revalidate: 0 },
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(JUSTWATCH_REQUEST_TIMEOUT_MS)])
+          : AbortSignal.timeout(JUSTWATCH_REQUEST_TIMEOUT_MS),
+      });
 
-    if (response.status === 429) {
-      throw buildRetryableStatusError(response, url);
-    }
-
-    if (RETRYABLE_STATUS_CODES.has(response.status)) {
-      if (attempt >= JUSTWATCH_FETCH_ATTEMPTS) {
+      if (RETRYABLE_STATUS_CODES.has(response.status)) {
         throw buildRetryableStatusError(response, url);
       }
 
+      return response;
+    } catch (error) {
+      signal?.throwIfAborted();
+      if (error instanceof JustWatchRateLimitError || attempt === JUSTWATCH_FETCH_ATTEMPTS) {
+        throw error;
+      }
       await delay(JUSTWATCH_RETRY_DELAY_MS * attempt);
-      return fetchJustWatchHtmlAttempt(url, attempt + 1);
     }
-
-    return response;
-  } catch (error) {
-    if (error instanceof JustWatchRateLimitError) {
-      throw error;
-    }
-
-    if (attempt < JUSTWATCH_FETCH_ATTEMPTS) {
-      await delay(JUSTWATCH_RETRY_DELAY_MS * attempt);
-      return fetchJustWatchHtmlAttempt(url, attempt + 1);
-    }
-
-    throw error;
   }
+
+  throw new Error("JustWatch lookup attempts exhausted");
 }
 
 function extractMovieUrls(html: string): string[] {
