@@ -163,9 +163,8 @@ export function AppShell() {
       selectedServices: state.selectedServices,
       availabilityByMovieKey: state.availabilityCache,
       showAll: state.showAll,
-      includePending: state.loadingCount > 0 || state.retryCount > 0,
     }),
-    [activeList, state.availabilityCache, state.loadingCount, state.retryCount, state.selectedServices, state.showAll],
+    [activeList, state.availabilityCache, state.selectedServices, state.showAll],
   );
 
   function handleToggleService(service: StreamingService) {

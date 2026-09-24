@@ -10,6 +10,9 @@ Movie Night is a mobile-first personal utility for answering a single question q
 - looks up availability through a JustWatch-backed server route
 - hides unavailable titles by default, with a `Show all` toggle for the full list
 - caches availability for 24 hours in the browser
+- searches the active list by title or year and pages through 20 matching titles at a time
+
+With services selected, pagination includes only titles available on those services. **Show all** is optional and has its own pages for the complete list. Search applies across every page. For titles imported without a release year, an exact JustWatch title match ends the lookup without searching extra result pages.
 
 ## Local development
 

@@ -8,6 +8,19 @@ test.afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
+test("an exact title without a year stops after its direct page", async () => {
+  const requestedUrls: string[] = [];
+  globalThis.fetch = async (input) => {
+    requestedUrls.push(String(input));
+    return new Response('<script type="application/ld+json">{"@type":"Movie","name":"Heat","dateCreated":"1995"}</script>');
+  };
+
+  const result = await fetchJustWatchAvailability("heat__unknown", "Heat");
+
+  assert.deepEqual(requestedUrls, ["https://www.justwatch.com/us/movie/heat"]);
+  assert.equal(result.title, "Heat");
+});
+
 test("fetchJustWatchAvailability parses streaming services from JustWatch JSON-LD", async () => {
   let requestedUrl = "";
   let requestedInit: RequestInit | undefined;

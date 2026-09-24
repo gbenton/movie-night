@@ -51,6 +51,7 @@ async function fetchBestJustWatchPage(
 ): Promise<{ movie: JustWatchJsonLdMovie; url: string } | undefined> {
   const urls = [...buildCandidateUrls(title, year)];
   const inspectedUrls = new Set(urls);
+  const strongMatchScore = typeof year === "number" ? 7 : 4;
   let bestCandidate: { movie: JustWatchJsonLdMovie; url: string; score: number } | undefined;
 
   async function inspectUrl(url: string): Promise<boolean> {
@@ -79,12 +80,12 @@ async function fetchBestJustWatchPage(
       bestCandidate = { movie, url: extractCanonicalUrl(html) ?? url, score };
     }
 
-    return score >= 7;
+    return score >= strongMatchScore;
   }
 
   await inspectUrlsInOrder(urls, inspectUrl);
 
-  if (!bestCandidate || bestCandidate.score < 7) {
+  if (!bestCandidate || bestCandidate.score < strongMatchScore) {
     await inspectSearchUrlsInOrder(await fetchSearchResultUrls(title), inspectedUrls, inspectUrl);
   }
 
