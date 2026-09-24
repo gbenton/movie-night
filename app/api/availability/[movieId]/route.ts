@@ -5,6 +5,8 @@ const AVAILABILITY_ROUTE_TIMEOUT_MS = 10_000;
 
 export async function POST(request: Request, context: { params: Promise<{ movieId: string }> }) {
   const { movieId } = await context.params;
+  const timeoutController = new AbortController();
+  const timeout = setTimeout(() => timeoutController.abort(new Error("Availability lookup timed out")), AVAILABILITY_ROUTE_TIMEOUT_MS);
 
   try {
     const body = (await request.json()) as { title?: string; year?: number };
@@ -12,7 +14,12 @@ export async function POST(request: Request, context: { params: Promise<{ movieI
       return NextResponse.json({ error: "Missing title" }, { status: 400 });
     }
 
-    const result = await withTimeout(fetchJustWatchAvailability(movieId, body.title, body.year), AVAILABILITY_ROUTE_TIMEOUT_MS);
+    const result = await fetchJustWatchAvailability(
+      movieId,
+      body.title,
+      body.year,
+      AbortSignal.any([request.signal, timeoutController.signal]),
+    );
     if (result.failureReason === "rate_limited") {
       const retryAfterSeconds = Math.max(1, Math.ceil((result.retryAfterMs ?? 20_000) / 1_000));
       return NextResponse.json(result, {
@@ -29,14 +36,7 @@ export async function POST(request: Request, context: { params: Promise<{ movieI
       },
       { status: 500 },
     );
+  } finally {
+    clearTimeout(timeout);
   }
-}
-
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) => {
-      setTimeout(() => reject(new Error("Availability lookup timed out")), timeoutMs);
-    }),
-  ]);
 }

@@ -7,7 +7,9 @@ import { MovieListView } from "./MovieListView";
 import { ServiceSelector } from "./ServiceSelector";
 import { AVAILABILITY_LOOKUP_MAX_ATTEMPTS, useAvailabilityLookupQueue } from "./useAvailabilityLookupQueue";
 import { createBatcher, type Batcher } from "../lib/availability/batcher";
+import { shouldReplaceAvailability } from "../lib/availability/cache";
 import { filterMovies } from "../lib/filterMovies";
+import { createMovieId } from "../lib/normalize";
 import {
   getAvailabilityCache,
   getLastUsedListId,
@@ -63,7 +65,9 @@ export function AppShell() {
     availabilityBatcherRef.current = createBatcher((updates) => {
       const nextAvailabilityCache = { ...availabilityCacheRef.current };
       for (const { movieKey, availability } of updates) {
-        nextAvailabilityCache[movieKey] = availability;
+        if (shouldReplaceAvailability(nextAvailabilityCache[movieKey], availability)) {
+          nextAvailabilityCache[movieKey] = availability;
+        }
       }
       availabilityCacheRef.current = nextAvailabilityCache;
       dispatch({ type: "setAvailabilityBatch", updates });
@@ -163,9 +167,13 @@ export function AppShell() {
       selectedServices: state.selectedServices,
       availabilityByMovieKey: state.availabilityCache,
       showAll: state.showAll,
-      includePending: state.loadingCount > 0 || state.retryCount > 0,
     }),
-    [activeList, state.availabilityCache, state.loadingCount, state.retryCount, state.selectedServices, state.showAll],
+    [activeList, state.availabilityCache, state.selectedServices, state.showAll],
+  );
+  const rateLimitedCount = useMemo(
+    () => activeList?.movies.reduce((count, movie) =>
+      count + (state.availabilityCache[createMovieId(movie.title, movie.year)]?.failureReason === "rate_limited" ? 1 : 0), 0) ?? 0,
+    [activeList, state.availabilityCache],
   );
 
   function handleToggleService(service: StreamingService) {
@@ -234,6 +242,7 @@ export function AppShell() {
           retryCount={state.retryCount}
           retryAttempt={state.retryAttempt}
           retryAttemptLimit={AVAILABILITY_LOOKUP_MAX_ATTEMPTS}
+          rateLimitedCount={rateLimitedCount}
         />
       </div>
     </main>
@@ -320,7 +329,9 @@ function appShellReducer(state: AppShellState, action: AppShellAction): AppShell
     case "setAvailabilityBatch": {
       const availabilityCache = { ...state.availabilityCache };
       for (const { movieKey, availability } of action.updates) {
-        availabilityCache[movieKey] = availability;
+        if (shouldReplaceAvailability(availabilityCache[movieKey], availability)) {
+          availabilityCache[movieKey] = availability;
+        }
       }
       return { ...state, availabilityCache };
     }

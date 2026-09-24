@@ -1,19 +1,21 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { isAvailabilityFresh, isAvailabilityTrusted } from "../lib/availability/cache";
+import { isAvailabilityFresh, shouldRetryAvailabilityNow } from "../lib/availability/cache";
 import { createMovieId } from "../lib/normalize";
 import { createTimeoutSignal } from "../lib/timeoutSignal";
 import type { AvailabilityResult, MovieItem, MovieList } from "../lib/types";
 
-const AVAILABILITY_FIRST_PASS_CONCURRENCY = 8;
+const AVAILABILITY_FIRST_PASS_CONCURRENCY = 4;
 const AVAILABILITY_FIRST_PASS_START_SPACING_MS = 0;
-const AVAILABILITY_RETRY_CONCURRENCY = 1;
-const AVAILABILITY_RETRY_START_SPACING_MS = 2_500;
+const AVAILABILITY_RETRY_CONCURRENCY = 2;
+const AVAILABILITY_RETRY_START_SPACING_MS = 500;
 const AVAILABILITY_CLIENT_TIMEOUT_MS = 20_000;
-export const AVAILABILITY_LOOKUP_MAX_ATTEMPTS = 5;
-const AVAILABILITY_UNTRUSTED_RETRY_DELAY_MS = 6_000;
-const AVAILABILITY_UNTRUSTED_STREAK_COOLDOWN_MS = 12_000;
+export const AVAILABILITY_LOOKUP_MAX_ATTEMPTS = 2;
+const AVAILABILITY_RATE_LIMIT_FALLBACK_MS = 12_000;
+const AVAILABILITY_MAX_RETRY_TITLES = 24;
+const AVAILABILITY_MAX_RATE_LIMIT_COOLDOWN_MS = 20_000;
+const AVAILABILITY_RATE_LIMIT_CIRCUIT_THRESHOLD = 4;
 
 interface LookupQueueItem {
   movie: MovieItem;
@@ -38,7 +40,6 @@ export function useAvailabilityLookupQueue({
   onRetryCountChange,
 }: AvailabilityLookupQueueOptions) {
   const lookupRunIdRef = useRef(0);
-  const inFlightAvailabilityKeysRef = useRef<Set<string>>(new Set());
   const availabilityCacheRef = useRef<Record<string, AvailabilityResult>>(availabilityCache);
 
   useEffect(() => {
@@ -65,7 +66,7 @@ export function useAvailabilityLookupQueue({
     for (const movie of activeList.movies) {
       const key = createMovieId(movie.title, movie.year);
       const availability = availabilityCacheRef.current[key];
-      if (!inFlightAvailabilityKeysRef.current.has(key) && !isAvailabilityFresh(availability)) {
+      if (!isAvailabilityFresh(availability)) {
         staleMovieByKey.set(key, movie);
       }
     }
@@ -77,15 +78,16 @@ export function useAvailabilityLookupQueue({
     }
 
     let cancelled = false;
+    const controller = new AbortController();
     const foregroundPendingKeys = new Set(staleMovies.map((movie) => createMovieId(movie.title, movie.year)));
     const retryPendingKeys = new Set<string>();
     onLoadingCountChange(foregroundPendingKeys.size);
     onRetryCountChange(0);
     onRetryAttemptChange(0);
 
-    runLookupQueue({
+    void runLookupQueue({
       getCancelled: () => cancelled || lookupRunIdRef.current !== runId,
-      inFlightAvailabilityKeys: inFlightAvailabilityKeysRef.current,
+      signal: controller.signal,
       movies: staleMovies,
       onAvailability,
       onComplete: resetQueueStatus,
@@ -98,6 +100,7 @@ export function useAvailabilityLookupQueue({
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [
     activeList,
@@ -111,7 +114,7 @@ export function useAvailabilityLookupQueue({
 interface RunLookupQueueOptions {
   foregroundPendingKeys: Set<string>;
   getCancelled: () => boolean;
-  inFlightAvailabilityKeys: Set<string>;
+  signal: AbortSignal;
   movies: MovieItem[];
   onAvailability: (movieKey: string, availability: AvailabilityResult) => void;
   onComplete: () => void;
@@ -121,10 +124,10 @@ interface RunLookupQueueOptions {
   retryPendingKeys: Set<string>;
 }
 
-function runLookupQueue({
+export function runLookupQueue({
   foregroundPendingKeys,
   getCancelled,
-  inFlightAvailabilityKeys,
+  signal,
   movies,
   onAvailability,
   onComplete,
@@ -132,18 +135,19 @@ function runLookupQueue({
   onRetryAttemptChange,
   onRetryCountChange,
   retryPendingKeys,
-}: RunLookupQueueOptions) {
-  void (async () => {
+}: RunLookupQueueOptions): Promise<void> {
+  return (async () => {
     const firstPassQueue: LookupQueueItem[] = movies.map((movie) => ({ movie, attempt: 1 }));
     const retryQueue: LookupQueueItem[] = [];
     const waitForFirstPassStart = createStartLimiter(AVAILABILITY_FIRST_PASS_START_SPACING_MS);
     const waitForRetryStart = createStartLimiter(AVAILABILITY_RETRY_START_SPACING_MS);
     let rateLimitPauseUntil = 0;
-    let untrustedResultStreak = 0;
+    let rateLimitCooldownStarted = false;
+    let rateLimitsAfterCooldown = 0;
+    let providerUnavailable = false;
 
     async function lookupMovie({ movie, attempt }: LookupQueueItem) {
       const key = createMovieId(movie.title, movie.year);
-      inFlightAvailabilityKeys.add(key);
 
       try {
         await waitForDocumentVisible(getCancelled);
@@ -151,28 +155,41 @@ function runLookupQueue({
           return;
         }
 
-        const update = await fetchAvailability(movie);
-        const trusted = isAvailabilityTrusted(update);
+        const update = await fetchAvailability(movie, signal);
+        if (getCancelled()) return;
+        rateLimitsAfterCooldown = 0;
+        const retryable = shouldRetryAvailabilityNow(update);
         const exhausted = attempt >= AVAILABILITY_LOOKUP_MAX_ATTEMPTS;
-        if (trusted || exhausted) {
-          onAvailability(key, update);
-        }
+        onAvailability(key, update);
         markForegroundLookupFinished(key);
 
-        if (!trusted && !exhausted) {
+        if (retryable && !exhausted && retryPendingKeys.size < AVAILABILITY_MAX_RETRY_TITLES) {
           retryPendingKeys.add(key);
           retryQueue.push({ movie, attempt: attempt + 1 });
         } else {
           retryPendingKeys.delete(key);
         }
 
-        untrustedResultStreak = trusted ? 0 : untrustedResultStreak + 1;
       } catch (error) {
+        if (getCancelled()) return;
         if (error instanceof AvailabilityRateLimitError) {
-          rateLimitPauseUntil = Math.max(rateLimitPauseUntil, Date.now() + error.retryAfterMs);
+          if (!rateLimitCooldownStarted && error.retryAfterMs <= AVAILABILITY_MAX_RATE_LIMIT_COOLDOWN_MS) {
+            rateLimitPauseUntil = Date.now() + error.retryAfterMs;
+            rateLimitCooldownStarted = true;
+          } else if (error.retryAfterMs > AVAILABILITY_MAX_RATE_LIMIT_COOLDOWN_MS) {
+            providerUnavailable = true;
+          } else if (Date.now() >= rateLimitPauseUntil) {
+            rateLimitsAfterCooldown += 1;
+            providerUnavailable = rateLimitsAfterCooldown >= AVAILABILITY_RATE_LIMIT_CIRCUIT_THRESHOLD;
+          }
           markForegroundLookupFinished(key);
-          retryPendingKeys.add(key);
-          retryQueue.push({ movie, attempt });
+          onAvailability(key, buildUnknownAvailability(movie, "rate_limited"));
+          if (!providerUnavailable && attempt < AVAILABILITY_LOOKUP_MAX_ATTEMPTS && retryPendingKeys.size < AVAILABILITY_MAX_RETRY_TITLES) {
+            retryPendingKeys.add(key);
+            retryQueue.push({ movie, attempt: attempt + 1 });
+          } else {
+            retryPendingKeys.delete(key);
+          }
           return;
         }
 
@@ -180,20 +197,17 @@ function runLookupQueue({
         markForegroundLookupFinished(key);
 
         if (exhausted) {
-          onAvailability(key, buildUnknownAvailability(movie));
+          onAvailability(key, buildUnknownAvailability(movie, "lookup_failed"));
         }
 
-        if (!exhausted) {
+        if (!exhausted && retryPendingKeys.size < AVAILABILITY_MAX_RETRY_TITLES) {
           retryPendingKeys.add(key);
           retryQueue.push({ movie, attempt: attempt + 1 });
         } else {
           retryPendingKeys.delete(key);
         }
 
-        untrustedResultStreak += 1;
       } finally {
-        inFlightAvailabilityKeys.delete(key);
-
         if (!getCancelled()) {
           onLoadingCountChange(foregroundPendingKeys.size);
           onRetryCountChange(retryPendingKeys.size);
@@ -211,7 +225,7 @@ function runLookupQueue({
       waitForStart: (shouldCancel: () => boolean) => Promise<void>,
     ): Promise<void> {
       async function runWorker(): Promise<void> {
-        if (getCancelled()) {
+        if (getCancelled() || providerUnavailable) {
           return;
         }
 
@@ -220,9 +234,10 @@ function runLookupQueue({
           return;
         }
 
-        await waitForStart(getCancelled);
         await waitForRateLimitPause();
-        if (getCancelled()) {
+        await waitForStart(getCancelled);
+        if (getCancelled() || providerUnavailable) {
+          items.unshift(item);
           return;
         }
 
@@ -234,7 +249,7 @@ function runLookupQueue({
     }
 
     async function processRetryQueue(): Promise<void> {
-      if (getCancelled()) {
+      if (getCancelled() || providerUnavailable) {
         return;
       }
 
@@ -252,12 +267,15 @@ function runLookupQueue({
       }
 
       onRetryAttemptChange(nextAttempt);
-      await delay(getRetryDelayMs(nextAttempt, untrustedResultStreak));
       await processLookupItems(
         retryWave,
         Math.min(AVAILABILITY_RETRY_CONCURRENCY, retryWave.length),
         waitForRetryStart,
       );
+      if (providerUnavailable) {
+        retryQueue.push(...retryWave);
+        return;
+      }
       return processRetryQueue();
     }
 
@@ -274,6 +292,15 @@ function runLookupQueue({
       waitForFirstPassStart,
     );
     await processRetryQueue();
+
+    if (providerUnavailable && !getCancelled()) {
+      for (const { movie } of [...firstPassQueue, ...retryQueue]) {
+        const key = createMovieId(movie.title, movie.year);
+        onAvailability(key, buildUnknownAvailability(movie, "rate_limited"));
+        foregroundPendingKeys.delete(key);
+        retryPendingKeys.delete(key);
+      }
+    }
 
     if (!getCancelled()) {
       onComplete();
@@ -304,12 +331,13 @@ function createStartLimiter(spacingMs: number): (shouldCancel: () => boolean) =>
   };
 }
 
-async function fetchAvailability(movie: MovieItem): Promise<AvailabilityResult> {
+async function fetchAvailability(movie: MovieItem, signal: AbortSignal): Promise<AvailabilityResult> {
+  const timeoutSignal = createTimeoutSignal(AVAILABILITY_CLIENT_TIMEOUT_MS);
   const response = await fetch(`/api/availability/${encodeURIComponent(movie.id)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title: movie.title, year: movie.year }),
-    signal: createTimeoutSignal(AVAILABILITY_CLIENT_TIMEOUT_MS),
+    signal: timeoutSignal ? AbortSignal.any([signal, timeoutSignal]) : signal,
   });
 
   if (response.status === 429) {
@@ -336,7 +364,7 @@ class AvailabilityRateLimitError extends Error {
 
 function parseRetryAfterHeader(value: string | null): number {
   if (!value) {
-    return AVAILABILITY_UNTRUSTED_STREAK_COOLDOWN_MS;
+    return AVAILABILITY_RATE_LIMIT_FALLBACK_MS;
   }
 
   const seconds = Number.parseInt(value, 10);
@@ -346,20 +374,8 @@ function parseRetryAfterHeader(value: string | null): number {
 
   const retryAt = Date.parse(value);
   return Number.isNaN(retryAt)
-    ? AVAILABILITY_UNTRUSTED_STREAK_COOLDOWN_MS
+    ? AVAILABILITY_RATE_LIMIT_FALLBACK_MS
     : Math.max(1_000, retryAt - Date.now());
-}
-
-function getRetryDelayMs(attempt: number, untrustedResultStreak: number): number {
-  if (untrustedResultStreak >= 3) {
-    return AVAILABILITY_UNTRUSTED_STREAK_COOLDOWN_MS;
-  }
-
-  if (untrustedResultStreak > 0) {
-    return AVAILABILITY_UNTRUSTED_RETRY_DELAY_MS * (attempt - 1);
-  }
-
-  return AVAILABILITY_RETRY_START_SPACING_MS;
 }
 
 function waitForDocumentVisible(shouldCancel: () => boolean): Promise<void> {
@@ -382,7 +398,7 @@ function waitForDocumentVisible(shouldCancel: () => boolean): Promise<void> {
   });
 }
 
-function buildUnknownAvailability(movie: MovieItem): AvailabilityResult {
+function buildUnknownAvailability(movie: MovieItem, failureReason: "rate_limited" | "lookup_failed"): AvailabilityResult {
   return {
     movieId: movie.id,
     title: movie.title,
@@ -390,5 +406,6 @@ function buildUnknownAvailability(movie: MovieItem): AvailabilityResult {
     services: [],
     lastCheckedAt: new Date().toISOString(),
     status: "unknown",
+    failureReason,
   };
 }

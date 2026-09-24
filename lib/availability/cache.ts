@@ -30,3 +30,13 @@ export function isAvailabilityTrusted(entry?: AvailabilityResult): boolean {
 
   return entry.matchConfidence !== "low";
 }
+
+/** A missing title gets a short cache lifetime, but repeating the same search now will not help. */
+export function shouldRetryAvailabilityNow(entry: AvailabilityResult): boolean {
+  return entry.status === "unknown";
+}
+
+/** Keep the last confirmed answer visible if a refresh cannot reach the provider. */
+export function shouldReplaceAvailability(previous: AvailabilityResult | undefined, next: AvailabilityResult): boolean {
+  return next.status !== "unknown" || !previous || previous.status === "unknown";
+}

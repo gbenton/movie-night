@@ -8,6 +8,19 @@ test.afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
+test("an exact title without a year stops after its direct page", async () => {
+  const requestedUrls: string[] = [];
+  globalThis.fetch = async (input) => {
+    requestedUrls.push(String(input));
+    return new Response('<script type="application/ld+json">{"@type":"Movie","name":"Heat","dateCreated":"1995"}</script>');
+  };
+
+  const result = await fetchJustWatchAvailability("heat__unknown", "Heat");
+
+  assert.deepEqual(requestedUrls, ["https://www.justwatch.com/us/movie/heat"]);
+  assert.equal(result.title, "Heat");
+});
+
 test("fetchJustWatchAvailability parses streaming services from JustWatch JSON-LD", async () => {
   let requestedUrl = "";
   let requestedInit: RequestInit | undefined;
@@ -449,6 +462,25 @@ test("fetchJustWatchAvailability retries transient JustWatch responses", async (
   assert.equal(result.matchConfidence, "high");
 });
 
+test("fetchJustWatchAvailability stops after two failed upstream attempts", async () => {
+  const originalConsoleError = console.error;
+  let requests = 0;
+  globalThis.fetch = async () => {
+    requests += 1;
+    return new Response("Service unavailable", { status: 503 });
+  };
+  console.error = () => {};
+
+  try {
+    const result = await fetchJustWatchAvailability("heat", "Heat");
+    assert.equal(requests, 2);
+    assert.equal(result.status, "unknown");
+    assert.equal(result.failureReason, "lookup_failed");
+  } finally {
+    console.error = originalConsoleError;
+  }
+});
+
 test("fetchJustWatchAvailability marks sustained rate limits as retryable unknowns", async () => {
   const originalConsoleError = console.error;
   const requestedUrls: string[] = [];
@@ -486,4 +518,21 @@ test("fetchJustWatchAvailability treats blocked JustWatch pages as unknown inste
   } finally {
     console.error = originalConsoleError;
   }
+});
+
+test("fetchJustWatchAvailability cancels upstream work when its request is abandoned", async () => {
+  const controller = new AbortController();
+  let requests = 0;
+  globalThis.fetch = async (_input, init) => {
+    requests += 1;
+    return new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+    });
+  };
+
+  const lookup = fetchJustWatchAvailability("heat", "Heat", undefined, controller.signal);
+  controller.abort(new Error("list changed"));
+
+  await assert.rejects(lookup, /list changed/);
+  assert.equal(requests, 1);
 });
